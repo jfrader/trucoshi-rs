@@ -1,0 +1,6 @@
+target
+node_modules
+.git
+schemas/ws/v2/*.ts
+schemas/ws/v2/*.json
+# (keep schemas if you want them in the image; for runtime they are not needed)

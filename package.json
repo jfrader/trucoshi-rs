@@ -1,0 +1,25 @@
+{
+  "name": "trucoshi-rs",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "gen:ws:schema": "~/.cargo/bin/cargo run -p trucoshi-realtime --features json-schema --bin ws_schema_v2 -- ./schemas/ws/v2", 
+    "gen:ws:types": "node scripts/gen-ws-types.mjs",
+    "gen:ws": "npm run gen:ws:schema && npm run gen:ws:types"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jfrader/trucoshi-rs.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/jfrader/trucoshi-rs/issues"
+  },
+  "homepage": "https://github.com/jfrader/trucoshi-rs#readme",
+  "devDependencies": {
+    "json-schema-to-typescript": "^15.0.4"
+  }
+}

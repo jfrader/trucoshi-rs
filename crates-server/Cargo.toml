@@ -1,0 +1,25 @@
+[package]
+name = "trucoshi-server"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+headers = { workspace = true }
+tower-http = { workspace = true }
+sqlx = { workspace = true }
+time = { workspace = true }
+base64 = { workspace = true }
+
+trucoshi-store = { path = "../crates-store" }
+trucoshi-auth = { path = "../crates-auth" }
+trucoshi-game = { path = "../crates-game" }
+trucoshi-realtime = { path = "../crates-realtime" }

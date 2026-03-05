@@ -1,0 +1,52 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: trucoshi
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - trucoshi_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d trucoshi"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+    # Optional: create .env.dev from .env.dev.example and tweak.
+    # (docker-compose v1 errors if the file is missing, so keep this commented by default)
+    # env_file:
+    #   - .env.dev
+
+    environment:
+      APP_ENV: development
+      APP_ADDR: 0.0.0.0:2992
+      PUBLIC_BASE_URL: http://localhost:2992
+      DATABASE_URL: postgres://postgres:postgres@db:5432/trucoshi
+      JWT_SECRET: dev-secret-change-me
+      JWT_ISSUER: trucoshi
+      JWT_AUDIENCE: trucoshi
+      TWITTER_CLIENT_ID: TODO
+      TWITTER_CLIENT_SECRET: TODO
+
+    ports:
+      - "2992:2992"
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://127.0.0.1:2992/healthz >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  trucoshi_pg:

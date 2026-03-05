@@ -1,0 +1,560 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://trucoshi.dev/schemas/ws/v2/in.json",
+  "title": "Trucoshi WebSocket Protocol v2 — Inbound Frame (client -> server)",
+  "type": "object",
+  "required": [
+    "msg",
+    "v"
+  ],
+  "properties": {
+    "id": {
+      "description": "Optional correlation id (client sets; server echoes in responses).\n\nMissing: allowed. Explicit `null`: rejected.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/String"
+        }
+      ]
+    },
+    "msg": {
+      "description": "Tagged payload.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/C2sMessage"
+        }
+      ]
+    },
+    "v": {
+      "description": "Protocol version (must be exactly 2).",
+      "allOf": [
+        {
+          "$ref": "#/definitions/WsVersion"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "C2sMessage": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "type"
+          ],
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/PingData"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "ping"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Request a lobby snapshot.",
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "lobby.snapshot.get"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "type"
+          ],
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/MatchCreateData"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "match.create"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "type"
+          ],
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/MatchJoinData"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "match.join"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "type"
+          ],
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/MatchRefData"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "match.leave"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "type"
+          ],
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/MatchReadyData"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "match.ready"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Fetch the current match snapshot by id (useful after reconnects).",
+          "type": "object",
+          "required": [
+            "data",
+            "type"
+          ],
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/MatchRefData"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "match.snapshot.get"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Fetch the current gameplay snapshot by match id.",
+          "type": "object",
+          "required": [
+            "data",
+            "type"
+          ],
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/MatchRefData"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "game.snapshot.get"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "type"
+          ],
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/MatchRefData"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "match.start"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "type"
+          ],
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/MatchRefData"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "match.pause"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "type"
+          ],
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/MatchRefData"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "match.resume"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "type"
+          ],
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/ChatJoinData"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "chat.join"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "type"
+          ],
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/ChatSayData"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "chat.say"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Gameplay: play a card.",
+          "type": "object",
+          "required": [
+            "data",
+            "type"
+          ],
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/GamePlayCardData"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "game.play_card"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Gameplay: say a command (truco/envido/flor/etc).",
+          "type": "object",
+          "required": [
+            "data",
+            "type"
+          ],
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/GameSayData"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "game.say"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ChatJoinData": {
+      "type": "object",
+      "required": [
+        "roomId"
+      ],
+      "properties": {
+        "roomId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ChatSayData": {
+      "type": "object",
+      "required": [
+        "content",
+        "roomId"
+      ],
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "roomId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "GameCommand": {
+      "description": "Core gameplay commands (Truco argentino).",
+      "type": "string",
+      "enum": [
+        "truco",
+        "retruco",
+        "vale_cuatro",
+        "envido",
+        "real_envido",
+        "falta_envido",
+        "flor",
+        "contra_flor",
+        "contra_flor_al_resto",
+        "quiero",
+        "no_quiero",
+        "son_buenas"
+      ]
+    },
+    "GamePlayCardData": {
+      "type": "object",
+      "required": [
+        "cardIdx",
+        "matchId"
+      ],
+      "properties": {
+        "cardIdx": {
+          "description": "`cardIdx` references the caller's current hand ordering.\n\nMessage type: `game.play_card`",
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "matchId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "GameSayData": {
+      "type": "object",
+      "required": [
+        "command",
+        "matchId"
+      ],
+      "properties": {
+        "command": {
+          "$ref": "#/definitions/GameCommand"
+        },
+        "matchId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "MatchCreateData": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "description": "Display name for the creating player.",
+          "type": "string"
+        },
+        "options": {
+          "description": "Match options.\n\nOptional: when omitted, the server uses defaults.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/MatchOptions"
+            }
+          ]
+        },
+        "team": {
+          "description": "Optional requested team (0 or 1). Server may override if full.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/TeamIdx"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "MatchJoinData": {
+      "type": "object",
+      "required": [
+        "matchId",
+        "name"
+      ],
+      "properties": {
+        "matchId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "team": {
+          "description": "Optional requested team (0 or 1). Server may override if full.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/TeamIdx"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "MatchOptions": {
+      "type": "object",
+      "required": [
+        "flor",
+        "matchPoints",
+        "maxPlayers",
+        "turnTimeMs"
+      ],
+      "properties": {
+        "flor": {
+          "description": "Whether Flor is enabled.",
+          "type": "boolean"
+        },
+        "matchPoints": {
+          "description": "Points required to win the match.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 15.0,
+          "minimum": 1.0
+        },
+        "maxPlayers": {
+          "description": "Maximum number of players allowed in the match.\n\nProtocol v2: this is intentionally constrained to the UI-supported range.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 6.0,
+          "minimum": 2.0
+        },
+        "turnTimeMs": {
+          "description": "Turn timer in milliseconds.",
+          "type": "integer",
+          "format": "int64",
+          "maximum": 600000.0,
+          "minimum": 1.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "MatchReadyData": {
+      "type": "object",
+      "required": [
+        "matchId",
+        "ready"
+      ],
+      "properties": {
+        "matchId": {
+          "type": "string"
+        },
+        "ready": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "MatchRefData": {
+      "type": "object",
+      "required": [
+        "matchId"
+      ],
+      "properties": {
+        "matchId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PingData": {
+      "type": "object",
+      "required": [
+        "clientTimeMs"
+      ],
+      "properties": {
+        "clientTimeMs": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "additionalProperties": false
+    },
+    "String": {
+      "type": "string"
+    },
+    "TeamIdx": {
+      "type": "integer",
+      "format": "uint8",
+      "enum": [
+        0,
+        1
+      ],
+      "maximum": 1.0,
+      "minimum": 0.0
+    },
+    "WsVersion": {
+      "type": "integer",
+      "const": 2,
+      "maximum": 2.0,
+      "minimum": 2.0
+    }
+  }
+}

@@ -1,0 +1,834 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://trucoshi.dev/schemas/ws/v2/s2c.json",
+  "title": "Trucoshi WebSocket Protocol v2 — Server -> Client Payload",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "data",
+        "type"
+      ],
+      "properties": {
+        "data": {
+          "$ref": "#/definitions/PongData"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "pong"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "data",
+        "type"
+      ],
+      "properties": {
+        "data": {
+          "$ref": "#/definitions/HelloData"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "hello"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "data",
+        "type"
+      ],
+      "properties": {
+        "data": {
+          "$ref": "#/definitions/LobbySnapshotData"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "lobby.snapshot"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "data",
+        "type"
+      ],
+      "properties": {
+        "data": {
+          "$ref": "#/definitions/LobbyMatchUpsertData"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "lobby.match.upsert"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "data",
+        "type"
+      ],
+      "properties": {
+        "data": {
+          "$ref": "#/definitions/LobbyMatchRemoveData"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "lobby.match.remove"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "data",
+        "type"
+      ],
+      "properties": {
+        "data": {
+          "$ref": "#/definitions/MatchSnapshotData"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "match.snapshot"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "data",
+        "type"
+      ],
+      "properties": {
+        "data": {
+          "$ref": "#/definitions/MatchUpdateData"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "match.update"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "data",
+        "type"
+      ],
+      "properties": {
+        "data": {
+          "$ref": "#/definitions/MatchLeftData"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "match.left"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "data",
+        "type"
+      ],
+      "properties": {
+        "data": {
+          "$ref": "#/definitions/GameSnapshotData"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "game.snapshot"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "data",
+        "type"
+      ],
+      "properties": {
+        "data": {
+          "$ref": "#/definitions/GameUpdateData"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "game.update"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "data",
+        "type"
+      ],
+      "properties": {
+        "data": {
+          "$ref": "#/definitions/ChatSnapshotData"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "chat.snapshot"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "data",
+        "type"
+      ],
+      "properties": {
+        "data": {
+          "$ref": "#/definitions/ChatMessageData"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "chat.message"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "data",
+        "type"
+      ],
+      "properties": {
+        "data": {
+          "$ref": "#/definitions/ErrorPayload"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "error"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  ],
+  "definitions": {
+    "ChatMessageData": {
+      "type": "object",
+      "required": [
+        "message",
+        "roomId"
+      ],
+      "properties": {
+        "message": {
+          "$ref": "#/definitions/PublicChatMessage"
+        },
+        "roomId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ChatSnapshotData": {
+      "type": "object",
+      "required": [
+        "room"
+      ],
+      "properties": {
+        "room": {
+          "$ref": "#/definitions/PublicChatRoom"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "description": "Machine-readable error code.",
+          "type": "string"
+        },
+        "message": {
+          "description": "Human-readable error message.\n\nProtocol v2 is strict: this field is always present.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "GameCommand": {
+      "description": "Core gameplay commands (Truco argentino).",
+      "type": "string",
+      "enum": [
+        "truco",
+        "retruco",
+        "vale_cuatro",
+        "envido",
+        "real_envido",
+        "falta_envido",
+        "flor",
+        "contra_flor",
+        "contra_flor_al_resto",
+        "quiero",
+        "no_quiero",
+        "son_buenas"
+      ]
+    },
+    "GameSnapshotData": {
+      "type": "object",
+      "required": [
+        "game",
+        "matchId"
+      ],
+      "properties": {
+        "game": {
+          "$ref": "#/definitions/PublicGameState"
+        },
+        "matchId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "GameUpdateData": {
+      "type": "object",
+      "required": [
+        "game",
+        "matchId"
+      ],
+      "properties": {
+        "game": {
+          "$ref": "#/definitions/PublicGameState"
+        },
+        "matchId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "HandState": {
+      "description": "Gameplay hand state hints.",
+      "type": "string",
+      "enum": [
+        "waiting_play",
+        "waiting_for_truco_answer",
+        "waiting_envido_answer",
+        "waiting_envido_points_answer",
+        "waiting_flor_answer",
+        "display_flor_battle",
+        "display_previous_hand",
+        "finished"
+      ]
+    },
+    "HelloData": {
+      "type": "object",
+      "required": [
+        "serverVersion",
+        "sessionId"
+      ],
+      "properties": {
+        "serverVersion": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "LobbyMatch": {
+      "description": "Lobby match summary (protocol v2).\n\nThis is intentionally minimal and is the only match type used by lobby events. It should stay stable and UI-friendly.\n\nNote: we intentionally duplicate fields between `LobbyMatch` and `PublicMatch` instead of using a `flatten`ed base struct. This keeps Rust-side ergonomics simple and avoids schema/ generator edge-cases.",
+      "type": "object",
+      "required": [
+        "id",
+        "options",
+        "ownerSeatIdx",
+        "phase",
+        "players"
+      ],
+      "properties": {
+        "id": {
+          "description": "Match id (opaque).",
+          "type": "string"
+        },
+        "options": {
+          "$ref": "#/definitions/MatchOptions"
+        },
+        "ownerSeatIdx": {
+          "description": "Seat index (in `players[]`) of the current match owner.",
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "phase": {
+          "$ref": "#/definitions/MatchPhase"
+        },
+        "players": {
+          "description": "Players ordered by seating/turn order (server-defined).",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PublicPlayer"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "LobbyMatchRemoveData": {
+      "type": "object",
+      "required": [
+        "matchId"
+      ],
+      "properties": {
+        "matchId": {
+          "description": "Match id (same value as `PublicMatch.id`).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "LobbyMatchUpsertData": {
+      "type": "object",
+      "required": [
+        "match"
+      ],
+      "properties": {
+        "match": {
+          "$ref": "#/definitions/LobbyMatch"
+        }
+      },
+      "additionalProperties": false
+    },
+    "LobbySnapshotData": {
+      "type": "object",
+      "required": [
+        "matches"
+      ],
+      "properties": {
+        "matches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/LobbyMatch"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "MatchLeftData": {
+      "description": "Confirmation that the client has left a match.\n\nThis exists so `match.leave` does not need any legacy-style \"ok\" quirks.",
+      "type": "object",
+      "required": [
+        "matchId"
+      ],
+      "properties": {
+        "matchId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "MatchOptions": {
+      "type": "object",
+      "required": [
+        "flor",
+        "matchPoints",
+        "maxPlayers",
+        "turnTimeMs"
+      ],
+      "properties": {
+        "flor": {
+          "description": "Whether Flor is enabled.",
+          "type": "boolean"
+        },
+        "matchPoints": {
+          "description": "Points required to win the match.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 15.0,
+          "minimum": 1.0
+        },
+        "maxPlayers": {
+          "description": "Maximum number of players allowed in the match.\n\nProtocol v2: this is intentionally constrained to the UI-supported range.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 6.0,
+          "minimum": 2.0
+        },
+        "turnTimeMs": {
+          "description": "Turn timer in milliseconds.",
+          "type": "integer",
+          "format": "int64",
+          "maximum": 600000.0,
+          "minimum": 1.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "MatchPhase": {
+      "type": "string",
+      "enum": [
+        "lobby",
+        "started",
+        "paused",
+        "finished"
+      ]
+    },
+    "MatchSnapshotData": {
+      "type": "object",
+      "required": [
+        "match"
+      ],
+      "properties": {
+        "match": {
+          "$ref": "#/definitions/PublicMatch"
+        },
+        "me": {
+          "$ref": "#/definitions/PrivatePlayer"
+        }
+      },
+      "additionalProperties": false
+    },
+    "MatchUpdateData": {
+      "type": "object",
+      "required": [
+        "match"
+      ],
+      "properties": {
+        "match": {
+          "$ref": "#/definitions/PublicMatch"
+        },
+        "me": {
+          "$ref": "#/definitions/PrivatePlayer"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PlayedCard": {
+      "type": "object",
+      "required": [
+        "card",
+        "seatIdx"
+      ],
+      "properties": {
+        "card": {
+          "type": "string"
+        },
+        "seatIdx": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "PongData": {
+      "type": "object",
+      "required": [
+        "clientTimeMs",
+        "serverTimeMs"
+      ],
+      "properties": {
+        "clientTimeMs": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "serverTimeMs": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PrivatePlayer": {
+      "description": "Recipient-only private view of the current player.",
+      "type": "object",
+      "required": [
+        "commands",
+        "envidoPoints",
+        "hand",
+        "hasFlor",
+        "seatIdx",
+        "used"
+      ],
+      "properties": {
+        "commands": {
+          "description": "Commands the player is currently allowed to say.\n\nProtocol v2 is intentionally strict: this is a typed enum instead of free-form strings.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/GameCommand"
+          }
+        },
+        "envidoPoints": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "hand": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "hasFlor": {
+          "type": "boolean"
+        },
+        "seatIdx": {
+          "description": "Seat index in the match's current `players` ordering.",
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "used": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "PublicChatMessage": {
+      "type": "object",
+      "required": [
+        "content",
+        "dateMs",
+        "id",
+        "system",
+        "user"
+      ],
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "dateMs": {
+          "description": "Epoch millis.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "id": {
+          "type": "string"
+        },
+        "system": {
+          "description": "Whether the message is system-generated.\n\nProtocol v2 is strict: this field is always present (use `false` for normal messages).",
+          "type": "boolean"
+        },
+        "user": {
+          "$ref": "#/definitions/PublicChatUser"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PublicChatRoom": {
+      "type": "object",
+      "required": [
+        "id",
+        "messages"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "messages": {
+          "description": "Recent chat messages for the room (may be empty, but is always present).",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PublicChatMessage"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "PublicChatUser": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "seatIdx": {
+          "description": "Optional match seat index, if the sender is currently in a match.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/uint8"
+            }
+          ]
+        },
+        "team": {
+          "$ref": "#/definitions/TeamIdx"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PublicGameState": {
+      "description": "Minimal public game state (protocol v2).\n\nThis mirrors `trucoshi_game::PublicGameState` but uses `Maybe<T>` for optional fields.",
+      "type": "object",
+      "required": [
+        "forehandSeatIdx",
+        "handState",
+        "rounds",
+        "turnSeatIdx"
+      ],
+      "properties": {
+        "forehandSeatIdx": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "handState": {
+          "$ref": "#/definitions/HandState"
+        },
+        "rounds": {
+          "description": "Played cards grouped by round/trick.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/PlayedCard"
+            }
+          }
+        },
+        "turnSeatIdx": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "winnerTeamIdx": {
+          "description": "When set, the current hand is finished and the winner team is known.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/TeamIdx"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "PublicMatch": {
+      "description": "Public match snapshot (protocol v2).\n\nThis is the authoritative match state used by match-scoped events.",
+      "type": "object",
+      "required": [
+        "id",
+        "options",
+        "ownerSeatIdx",
+        "phase",
+        "players",
+        "teamPoints"
+      ],
+      "properties": {
+        "id": {
+          "description": "Match id (opaque).",
+          "type": "string"
+        },
+        "options": {
+          "$ref": "#/definitions/MatchOptions"
+        },
+        "ownerSeatIdx": {
+          "description": "Seat index (in `players[]`) of the current match owner.",
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "phase": {
+          "$ref": "#/definitions/MatchPhase"
+        },
+        "players": {
+          "description": "Players ordered by seating/turn order (server-defined).",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PublicPlayer"
+          }
+        },
+        "teamPoints": {
+          "description": "Current match points for teams 0 and 1.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          },
+          "maxItems": 2,
+          "minItems": 2
+        }
+      },
+      "additionalProperties": false
+    },
+    "PublicPlayer": {
+      "description": "Public player view (protocol v2).\n\nThis is designed to be minimal and UI-friendly: - The players array ordering is server-defined and stable for the lifetime of the match. - `ready` is per-player (no separate match-level ready list) - Match ownership is exposed at the match level via `ownerSeatIdx`.\n\nNote: player keys are server-internal (session-bound) and are intentionally not exposed.",
+      "type": "object",
+      "required": [
+        "name",
+        "ready",
+        "team"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "team": {
+          "$ref": "#/definitions/TeamIdx"
+        }
+      },
+      "additionalProperties": false
+    },
+    "TeamIdx": {
+      "type": "integer",
+      "format": "uint8",
+      "enum": [
+        0,
+        1
+      ],
+      "maximum": 1.0,
+      "minimum": 0.0
+    },
+    "uint8": {
+      "type": "integer",
+      "format": "uint8",
+      "minimum": 0.0
+    }
+  }
+}

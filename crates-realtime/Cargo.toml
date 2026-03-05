@@ -1,0 +1,21 @@
+[package]
+name = "trucoshi-realtime"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+futures-util = { workspace = true }
+trucoshi-game = { path = "../crates-game" }
+
+schemars = { version = "0.8", optional = true }
+
+[features]
+json-schema = ["dep:schemars", "trucoshi-game/json-schema"]
