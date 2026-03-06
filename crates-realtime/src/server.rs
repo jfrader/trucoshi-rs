@@ -828,11 +828,14 @@ impl Realtime {
                                     PlayOutcome::Invalid => {
                                         err = Some(("INVALID_CARD".into(), "invalid card".into()));
                                     }
-                                    PlayOutcome::HandEnded { winner_team_idx } => {
+                                    PlayOutcome::HandEnded {
+                                        winner_team_idx,
+                                        points,
+                                    } => {
                                         if winner_team_idx < 2 {
                                             m.team_points[winner_team_idx as usize] = m.team_points
                                                 [winner_team_idx as usize]
-                                                .saturating_add(1);
+                                                .saturating_add(points);
                                         }
 
                                         let match_points = m.options.match_points.max(1);
@@ -1018,11 +1021,15 @@ impl Realtime {
                                     now_ms,
                                 );
 
-                                if let CommandOutcome::HandEnded { winner_team_idx } = out {
+                                if let CommandOutcome::HandEnded {
+                                    winner_team_idx,
+                                    points,
+                                } = out
+                                {
                                     if winner_team_idx < 2 {
                                         m.team_points[winner_team_idx as usize] = m.team_points
                                             [winner_team_idx as usize]
-                                            .saturating_add(1);
+                                            .saturating_add(points);
                                     }
 
                                     let match_points = m.options.match_points.max(1);

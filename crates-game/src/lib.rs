@@ -66,8 +66,10 @@ pub enum PlayOutcome {
     TurnAdvanced,
     /// Trick ended and a new trick began.
     TrickEnded,
-    /// Hand ended; contains the winner team (0 or 1).
-    HandEnded { winner_team_idx: u8 },
+    /// Hand ended; contains the winner team (0 or 1) and the points awarded for the hand.
+    ///
+    /// Points correspond to the current Truco value (1..=4).
+    HandEnded { winner_team_idx: u8, points: u8 },
 }
 
 /// Outcome of applying a spoken command (truco/envido/etc).
@@ -76,7 +78,9 @@ pub enum CommandOutcome {
     /// No immediate resolution; the hand continues.
     None,
     /// The current hand ended as a consequence of the command.
-    HandEnded { winner_team_idx: u8 },
+    ///
+    /// Points correspond to the value earned due to the command resolution.
+    HandEnded { winner_team_idx: u8, points: u8 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +97,11 @@ struct PendingCall {
 
     /// Turn seat to restore after the pending answer is resolved.
     resume_turn_idx: u8,
+
+    /// For Truco calls, the value that would be played if accepted (2/3/4).
+    ///
+    /// For non-Truco calls, this is 0.
+    truco_target_value: u8,
 }
 
 /// Minimal, migration-friendly in-memory game state.
@@ -108,6 +117,11 @@ pub struct GameState {
 
     /// Pending command call awaiting an answer (truco/envido/flor).
     pending_call: Option<PendingCall>,
+
+    /// Current accepted Truco value for this hand (1..=4).
+    ///
+    /// Starts at 1 (no truco). If Truco/Retruco/Vale Cuatro are accepted, this increments up to 4.
+    truco_value: u8,
 
     /// Per-player hand (only revealed to the owning session via the `me` field on match events).
     hands: Vec<Vec<String>>,
@@ -165,15 +179,20 @@ impl GameState {
         let cmds: Vec<GameCommand> = match hs {
             WaitingPlay => {
                 let mut v = vec![
-                    // Truco escalation
-                    GameCommand::Truco,
-                    GameCommand::Retruco,
-                    GameCommand::ValeCuatro,
                     // Envido
                     GameCommand::Envido,
                     GameCommand::RealEnvido,
                     GameCommand::FaltaEnvido,
                 ];
+
+                // Truco escalation depends on the current accepted value.
+                // Start at 1 (no truco). Each accepted escalation increments up to 4.
+                match self.truco_value {
+                    1 => v.push(GameCommand::Truco),
+                    2 => v.push(GameCommand::Retruco),
+                    3 => v.push(GameCommand::ValeCuatro),
+                    _ => {}
+                }
 
                 // Flor (only if player has it).
                 if has_flor {
@@ -232,6 +251,7 @@ impl GameState {
             turn_idx: if players_len == 0 { 0 } else { forehand },
             turn_expires_at_ms: now_ms.saturating_add(turn_time_ms.max(0)),
             pending_call: None,
+            truco_value: 1,
             hands,
             used_hands,
         }
@@ -277,16 +297,34 @@ impl GameState {
             if let Some(kind) = call_kind_for_command(cmd) {
                 if self.pending_call.is_none() {
                     let caller_idx = u8::try_from(from_player_idx).unwrap_or(0);
-                    self.pending_call = Some(PendingCall {
-                        kind,
-                        caller_idx,
-                        resume_turn_idx: prev_turn,
-                    });
 
-                    let responder = next_opponent_idx(caller_idx, teams_by_player_idx);
-                    self.turn_idx = responder;
-                    self.public.turn_seat_idx = responder;
-                    self.turn_expires_at_ms = now_ms.saturating_add(turn_time_ms.max(0));
+                    let truco_target_value: u8 = match kind {
+                        PendingCallKind::Truco => match cmd {
+                            GameCommand::Truco if self.truco_value == 1 => 2,
+                            GameCommand::Retruco if self.truco_value == 2 => 3,
+                            GameCommand::ValeCuatro if self.truco_value == 3 => 4,
+                            _ => 0,
+                        },
+                        _ => 0,
+                    };
+
+                    // Reject invalid Truco escalations defensively (even if callers should
+                    // already be using `possible_commands_for_cards`).
+                    if kind == PendingCallKind::Truco && truco_target_value == 0 {
+                        // No state change.
+                    } else {
+                        self.pending_call = Some(PendingCall {
+                            kind,
+                            caller_idx,
+                            resume_turn_idx: prev_turn,
+                            truco_target_value,
+                        });
+
+                        let responder = next_opponent_idx(caller_idx, teams_by_player_idx);
+                        self.turn_idx = responder;
+                        self.public.turn_seat_idx = responder;
+                        self.turn_expires_at_ms = now_ms.saturating_add(turn_time_ms.max(0));
+                    }
                 }
             }
         }
@@ -310,10 +348,13 @@ impl GameState {
                             .unwrap_or(0);
                         let winner = if winner < 2 { winner } else { 0 };
 
+                        let points = p.truco_target_value.saturating_sub(1).max(1);
+
                         self.public.winner_team_idx = Some(winner);
                         self.public.hand_state = Finished;
                         return CommandOutcome::HandEnded {
                             winner_team_idx: winner,
+                            points,
                         };
                     }
                 }
@@ -327,6 +368,7 @@ impl GameState {
                     self.public.hand_state = Finished;
                     return CommandOutcome::HandEnded {
                         winner_team_idx: winner,
+                        points: 1,
                     };
                 }
 
@@ -342,6 +384,14 @@ impl GameState {
                 GameCommand::Quiero | GameCommand::NoQuiero,
             ) => {
                 if let Some(p) = self.pending_call.take() {
+                    // Accepting Truco escalations updates the hand value.
+                    if p.kind == PendingCallKind::Truco
+                        && matches!(cmd, GameCommand::Quiero)
+                        && p.truco_target_value >= 2
+                    {
+                        self.truco_value = p.truco_target_value.clamp(1, 4);
+                    }
+
                     self.turn_idx = p.resume_turn_idx;
                     self.public.turn_seat_idx = p.resume_turn_idx;
                     self.turn_expires_at_ms = now_ms.saturating_add(turn_time_ms.max(0));
@@ -450,7 +500,11 @@ impl GameState {
             }
 
             if let Some(winner_team_idx) = hand_winner {
-                return PlayOutcome::HandEnded { winner_team_idx };
+                let points = self.truco_value.clamp(1, 4);
+                return PlayOutcome::HandEnded {
+                    winner_team_idx,
+                    points,
+                };
             }
 
             // Trick ended but the hand continues: start next trick, and set next turn to the trick winner.
@@ -685,7 +739,13 @@ mod tests {
 
         // Opponent declines.
         let outcome = g.apply_command(GameCommand::NoQuiero, 1, &teams, 10_000, now);
-        assert_eq!(outcome, CommandOutcome::HandEnded { winner_team_idx: 0 });
+        assert_eq!(
+            outcome,
+            CommandOutcome::HandEnded {
+                winner_team_idx: 0,
+                points: 1
+            }
+        );
         assert_eq!(g.public.winner_team_idx, Some(0));
         assert_eq!(g.public.hand_state, HandState::Finished);
     }
