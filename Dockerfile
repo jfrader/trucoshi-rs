@@ -17,6 +17,7 @@ COPY crates-store crates-store
 COPY crates-game crates-game
 COPY crates-realtime crates-realtime
 COPY crates-server crates-server
+COPY crates-ws-schema-check crates-ws-schema-check
 COPY migrations migrations
 
 # Build the HTTP+WS server.

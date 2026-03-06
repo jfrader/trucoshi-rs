@@ -129,13 +129,13 @@ async fn main() -> anyhow::Result<()> {
             "/v1/tournaments",
             get(list_tournaments).post(create_tournament),
         )
-        .route("/v1/tournaments/:id", get(get_tournament))
+        .route("/v1/tournaments/{id}", get(get_tournament))
         .route(
-            "/v1/tournaments/:id/entries",
+            "/v1/tournaments/{id}/entries",
             get(list_tournament_entries).post(join_tournament),
         )
-        .route("/v1/tournaments/:id/open", post(open_tournament))
-        .route("/v1/tournaments/:id/cancel", post(cancel_tournament))
+        .route("/v1/tournaments/{id}/open", post(open_tournament))
+        .route("/v1/tournaments/{id}/cancel", post(cancel_tournament))
         .route("/v1/auth/twitter", get(twitter_start))
         .route("/v1/auth/twitter/callback", get(twitter_callback))
         .layer(TraceLayer::new_for_http())
