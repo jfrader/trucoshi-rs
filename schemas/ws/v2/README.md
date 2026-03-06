@@ -28,7 +28,7 @@ All WebSocket frames are JSON objects.
 {
   "v": 2,
   "id": "optional-correlation-id",
-  "msg": { "type": "ping", "data": { "clientTimeMs": 123 } }
+  "msg": { "type": "ping", "data": { "client_time_ms": 123 } }
 }
 ```
 
@@ -38,7 +38,7 @@ All WebSocket frames are JSON objects.
 {
   "v": 2,
   "id": "optional-correlation-id",
-  "msg": { "type": "pong", "data": { "serverTimeMs": 456, "clientTimeMs": 123 } }
+  "msg": { "type": "pong", "data": { "server_time_ms": 456, "client_time_ms": 123 } }
 }
 ```
 
@@ -48,9 +48,9 @@ All WebSocket frames are JSON objects.
 - `id` is optional; when provided by the client, the server **echoes it back** on the relevant response(s).
 - All message types are dot-separated namespaces using `snake_case` segments.
 - Player readiness is exposed per-player via `LobbyMatch.players[].ready` / `PublicMatch.players[].ready` (no separate ready list).
-- Player seating is implied by `players[]` ordering (no `PublicPlayer.seatIdx`).
-- Match ownership is exposed per-match via `ownerSeatIdx` (index into `players[]`), keeping `PublicPlayer` minimal.
-- Match score (`teamPoints`) is only part of match-scoped snapshots/updates (`PublicMatch`), not lobby summaries.
+- Player seating is implied by `players[]` ordering (no `PublicPlayer.seat_idx`).
+- Match ownership is exposed per-match via `owner_seat_idx` (index into `players[]`), keeping `PublicPlayer` minimal.
+- Match score (`team_points`) is only part of match-scoped snapshots/updates (`PublicMatch`), not lobby summaries.
 
 ## Core event namespaces
 
