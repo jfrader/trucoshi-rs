@@ -75,6 +75,14 @@ pub enum PlayOutcome {
 
 /// Outcome of applying a spoken command (truco/envido/etc).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaltaEnvidoGoal {
+    /// Award enough points to reach the next single falta (match_points).
+    OneFalta,
+    /// Award enough points to cover two faltas (2 × match_points).
+    TwoFaltas,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandOutcome {
     /// No immediate resolution; the hand continues.
     None,
@@ -315,6 +323,7 @@ impl GameState {
         teams_by_player_idx: &[u8],
         match_points: u8,
         current_team_points: [u8; 2],
+        falta_envido_goal: FaltaEnvidoGoal,
         turn_time_ms: i64,
         now_ms: i64,
     ) -> CommandOutcome {
@@ -425,11 +434,15 @@ impl GameState {
                         let mut reason = PointsAwardReason::EnvidoAccepted;
 
                         if p.envido_is_falta {
-                            let target = match_points.max(1);
                             let current = current_team_points
                                 .get(winner_team_idx as usize)
                                 .copied()
                                 .unwrap_or(0);
+                            let base = match_points.max(1);
+                            let target = match falta_envido_goal {
+                                FaltaEnvidoGoal::TwoFaltas => base.saturating_mul(2),
+                                FaltaEnvidoGoal::OneFalta => base,
+                            };
                             points = target.saturating_sub(current).max(1);
                             reason = PointsAwardReason::EnvidoFaltaAccepted;
                         }
@@ -1002,14 +1015,32 @@ mod tests {
         let teams = vec![0u8, 1u8];
 
         // Someone says TRUCO, we enter the answer state.
-        g.apply_command(GameCommand::Truco, 0, &teams, 9, [0, 0], 10_000, now);
+        g.apply_command(
+            GameCommand::Truco,
+            0,
+            &teams,
+            9,
+            [0, 0],
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
         assert_eq!(g.public.hand_state, HandState::WaitingForTrucoAnswer);
 
         // Answer turn should move to the opponent.
         assert_eq!(g.public.turn_seat_idx, 1);
 
         // Opponent declines.
-        let outcome = g.apply_command(GameCommand::NoQuiero, 1, &teams, 9, [0, 0], 10_000, now);
+        let outcome = g.apply_command(
+            GameCommand::NoQuiero,
+            1,
+            &teams,
+            9,
+            [0, 0],
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
         assert_eq!(
             outcome,
             CommandOutcome::HandEnded {
@@ -1030,12 +1061,30 @@ mod tests {
         assert_eq!(g.public.turn_seat_idx, 0);
 
         // Caller initiates.
-        g.apply_command(GameCommand::Truco, 0, &teams, 9, [0, 0], 10_000, now);
+        g.apply_command(
+            GameCommand::Truco,
+            0,
+            &teams,
+            9,
+            [0, 0],
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
         assert_eq!(g.public.hand_state, HandState::WaitingForTrucoAnswer);
         assert_eq!(g.public.turn_seat_idx, 1);
 
         // Opponent accepts.
-        g.apply_command(GameCommand::Quiero, 1, &teams, 9, [0, 0], 10_000, now);
+        g.apply_command(
+            GameCommand::Quiero,
+            1,
+            &teams,
+            9,
+            [0, 0],
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
         assert_eq!(g.public.hand_state, HandState::WaitingPlay);
         assert_eq!(g.public.turn_seat_idx, 0);
     }
@@ -1082,8 +1131,26 @@ mod tests {
         let mut g = GameState::new_with_forehand(2, 42, 10_000, now, 0);
         let teams = vec![0u8, 1u8];
 
-        g.apply_command(GameCommand::Envido, 0, &teams, 9, [0, 0], 10_000, now);
-        let outcome = g.apply_command(GameCommand::NoQuiero, 1, &teams, 9, [0, 0], 10_000, now);
+        g.apply_command(
+            GameCommand::Envido,
+            0,
+            &teams,
+            9,
+            [0, 0],
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
+        let outcome = g.apply_command(
+            GameCommand::NoQuiero,
+            1,
+            &teams,
+            9,
+            [0, 0],
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
 
         assert_eq!(
             outcome,
@@ -1109,8 +1176,26 @@ mod tests {
             *hand = vec!["7b".to_string(), "6b".to_string(), "5b".to_string()];
         }
 
-        g.apply_command(GameCommand::Envido, 0, &teams, 9, [0, 0], 10_000, now);
-        let outcome = g.apply_command(GameCommand::Quiero, 1, &teams, 9, [0, 0], 10_000, now);
+        g.apply_command(
+            GameCommand::Envido,
+            0,
+            &teams,
+            9,
+            [0, 0],
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
+        let outcome = g.apply_command(
+            GameCommand::Quiero,
+            1,
+            &teams,
+            9,
+            [0, 0],
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
 
         assert_eq!(
             outcome,
@@ -1143,6 +1228,7 @@ mod tests {
             &teams,
             9,
             current_points,
+            FaltaEnvidoGoal::OneFalta,
             10_000,
             now,
         );
@@ -1152,6 +1238,7 @@ mod tests {
             &teams,
             9,
             current_points,
+            FaltaEnvidoGoal::OneFalta,
             10_000,
             now,
         );
@@ -1161,6 +1248,52 @@ mod tests {
             CommandOutcome::PointsAwarded {
                 winner_team_idx: 0,
                 points: 4,
+                reason: PointsAwardReason::EnvidoFaltaAccepted,
+            }
+        );
+    }
+
+    #[test]
+    fn falta_envido_two_faltas_awards_two_stage_difference() {
+        let now = 1_000i64;
+        let mut g = GameState::new_with_forehand(2, 42, 10_000, now, 0);
+        let teams = vec![0u8, 1u8];
+
+        if let Some(hand) = g.hands.get_mut(0) {
+            *hand = vec!["7e".to_string(), "6e".to_string(), "5e".to_string()];
+        }
+        if let Some(hand) = g.hands.get_mut(1) {
+            *hand = vec!["1b".to_string(), "2c".to_string(), "3o".to_string()];
+        }
+
+        let current_points = [2u8, 0u8];
+
+        g.apply_command(
+            GameCommand::FaltaEnvido,
+            0,
+            &teams,
+            9,
+            current_points,
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
+        let outcome = g.apply_command(
+            GameCommand::Quiero,
+            1,
+            &teams,
+            9,
+            current_points,
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
+
+        assert_eq!(
+            outcome,
+            CommandOutcome::PointsAwarded {
+                winner_team_idx: 0,
+                points: 16,
                 reason: PointsAwardReason::EnvidoFaltaAccepted,
             }
         );

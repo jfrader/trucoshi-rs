@@ -1510,6 +1510,7 @@ impl Realtime {
                                     &teams_by_player_idx,
                                     m.options.match_points,
                                     m.team_points,
+                                    m.options.falta_envido_goal(),
                                     m.options.turn_time_ms,
                                     now_ms,
                                 );

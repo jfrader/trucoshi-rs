@@ -140,6 +140,10 @@ export interface MatchOptions {
    */
   abandon_time_ms?: number;
   /**
+   * Falta Envido scoring mode (`1` = two faltas / 2 × `match_points`, `2` = one falta / `match_points`).
+   */
+  falta_envido?: number;
+  /**
    * Whether Flor is enabled.
    */
   flor: boolean;

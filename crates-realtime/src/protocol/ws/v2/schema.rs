@@ -266,6 +266,10 @@ fn default_reconnect_grace_ms() -> i64 {
     5_000
 }
 
+fn default_falta_envido() -> u8 {
+    2
+}
+
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -288,6 +292,11 @@ pub struct MatchOptions {
     #[cfg_attr(feature = "json-schema", schemars(range(min = 1, max = 15)))]
     pub match_points: u8,
 
+    /// Falta Envido scoring mode (`1` = two faltas / 2 × `match_points`, `2` = one falta / `match_points`).
+    #[serde(default = "default_falta_envido")]
+    #[cfg_attr(feature = "json-schema", schemars(range(min = 1, max = 2)))]
+    pub falta_envido: u8,
+
     /// Turn timer in milliseconds.
     #[cfg_attr(feature = "json-schema", schemars(range(min = 1, max = 600_000)))]
     pub turn_time_ms: i64,
@@ -303,12 +312,23 @@ pub struct MatchOptions {
     pub reconnect_grace_ms: i64,
 }
 
+impl MatchOptions {
+    pub fn falta_envido_goal(&self) -> trucoshi_game::FaltaEnvidoGoal {
+        match self.falta_envido {
+            1 => trucoshi_game::FaltaEnvidoGoal::TwoFaltas,
+            2 => trucoshi_game::FaltaEnvidoGoal::OneFalta,
+            _ => trucoshi_game::FaltaEnvidoGoal::OneFalta,
+        }
+    }
+}
+
 impl Default for MatchOptions {
     fn default() -> Self {
         Self {
             max_players: 6,
             flor: true,
             match_points: 9,
+            falta_envido: default_falta_envido(),
             turn_time_ms: 30_000,
             abandon_time_ms: default_abandon_time_ms(),
             reconnect_grace_ms: default_reconnect_grace_ms(),

@@ -527,6 +527,14 @@
           "maximum": 600000.0,
           "minimum": 1.0
         },
+        "falta_envido": {
+          "description": "Falta Envido scoring mode (`1` = two faltas / 2 × `match_points`, `2` = one falta / `match_points`).",
+          "default": 2,
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 2.0,
+          "minimum": 1.0
+        },
         "flor": {
           "description": "Whether Flor is enabled.",
           "type": "boolean"
