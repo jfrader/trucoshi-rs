@@ -1497,7 +1497,19 @@ impl Realtime {
     fn private_player_for(m: &MatchState, recipient_key: Option<&str>) -> Option<PrivatePlayer> {
         let pkey = recipient_key?;
         let idx = m.players.iter().position(|p| p.key == pkey)?;
-        let g = m.game.as_ref()?;
+
+        // Important: we still need a private `me` view during the lobby phase so the
+        // client can know `seat_idx` and enable ready/start UX.
+        let Some(g) = m.game.as_ref() else {
+            return Some(PrivatePlayer {
+                seat_idx: u8::try_from(idx).expect("seat idx fits in u8"),
+                hand: vec![],
+                used: vec![],
+                commands: vec![],
+                has_flor: false,
+                envido_points: 0,
+            });
+        };
 
         let mut cards_for_calc: Vec<String> = Vec::new();
         let hand = g.hands().get(idx).cloned().unwrap_or_default();
