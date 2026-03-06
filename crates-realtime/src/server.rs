@@ -205,6 +205,10 @@ impl Realtime {
             } else {
                 // spectator: just detach from match participants / rooms
                 self.leave_match_watch_internal(session_id, &msid).await;
+
+                // Notify remaining participants and refresh lobby counts.
+                self.emit_match_update_to_match(&msid, None).await;
+                self.broadcast_lobby_match_upsert(&msid).await;
             }
         }
 
@@ -512,6 +516,10 @@ impl Realtime {
                 // Note: `emit_match_snapshot_to` already includes a game snapshot when gameplay is
                 // running, so we intentionally don't emit a separate `game.snapshot` here.
                 self.emit_match_snapshot_to(session_id, &match_id, id).await;
+
+                // Broadcast updated match/lobby state (e.g. spectator_count changes).
+                self.emit_match_update_to_match(&match_id, None).await;
+                self.broadcast_lobby_match_upsert(&match_id).await;
             }
 
             C2sMessage::MatchLeave(d) => {
@@ -570,6 +578,11 @@ impl Realtime {
                 } else {
                     // spectator: just detach
                     self.leave_match_watch_internal(session_id, &msid).await;
+
+                    // Notify remaining participants and refresh lobby counts.
+                    self.emit_match_update_to_match(&msid, None).await;
+                    self.broadcast_lobby_match_upsert(&msid).await;
+
                     false
                 };
 
@@ -1689,12 +1702,15 @@ impl Realtime {
             .position(|p| p.key == m.owner_key)
             .unwrap_or(0);
 
+        let spectator_count = (m.participants.len()).saturating_sub(m.players.len()) as u32;
+
         LobbyMatch {
             id: m.match_id.clone(),
             options: m.options.clone(),
             phase: m.phase,
             players,
             owner_seat_idx: u8::try_from(owner_seat_idx).unwrap_or(0),
+            spectator_count,
         }
     }
 
@@ -1715,12 +1731,15 @@ impl Realtime {
             .position(|p| p.key == m.owner_key)
             .unwrap_or(0);
 
+        let spectator_count = (m.participants.len()).saturating_sub(m.players.len()) as u32;
+
         PublicMatch {
             id: m.match_id.clone(),
             options: m.options.clone(),
             phase: m.phase,
             players,
             owner_seat_idx: u8::try_from(owner_seat_idx).unwrap_or(0),
+            spectator_count,
             team_points: m.team_points,
         }
     }
@@ -2703,6 +2722,10 @@ mod e2e_smoke_tests {
         assert!(saw_match_snapshot, "expected match.snapshot for spectator");
         assert!(saw_game_snapshot, "expected game.snapshot for spectator");
 
+        // The watch flow may also broadcast match/lobby updates (e.g. spectator_count).
+        // Drain anything pending so the next assertion is about the seat-only action.
+        while rx_spec.try_recv().is_ok() {}
+
         // Spectators should not be able to perform seat-only actions (e.g. play a card).
         rt.handle_message(
             spec,
@@ -2717,17 +2740,176 @@ mod e2e_smoke_tests {
         )
         .await;
 
-        let out = timeout(Duration::from_millis(250), rx_spec.recv())
-            .await
-            .expect("expected spectator error")
-            .expect("rx open");
+        // Skip over any unrelated broadcasts and find the expected error.
+        let mut saw_err = false;
+        for _ in 0..10 {
+            let out = timeout(Duration::from_millis(250), rx_spec.recv())
+                .await
+                .expect("expected spectator outbound message")
+                .expect("rx open");
 
-        match out.msg {
-            S2cMessage::Error(ErrorPayload { code, .. }) => {
-                assert_eq!(code, "NOT_A_PLAYER");
+            match out.msg {
+                S2cMessage::Error(ErrorPayload { code, .. }) => {
+                    assert_eq!(code, "NOT_A_PLAYER");
+                    saw_err = true;
+                    break;
+                }
+                _ => {}
             }
-            other => panic!("expected error payload; got {other:?}"),
         }
+
+        assert!(
+            saw_err,
+            "expected NOT_A_PLAYER error for spectator seat-only action"
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_spectator_watch_updates_spectator_count() {
+        use tokio::time::{Duration, timeout};
+
+        let rt = Realtime::new();
+
+        let (s1, mut rx1) = add_session(&rt, -1).await;
+        let (s2, _rx2) = add_session(&rt, -2).await;
+        let (spec, _rx_spec) = add_session(&rt, -3).await;
+
+        // Create a 2-player match.
+        rt.handle_message(
+            s1,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchCreate(MatchCreateData {
+                    name: "p1".into(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                    options: Some(MatchOptions {
+                        max_players: 2,
+                        flor: true,
+                        match_points: 1,
+                        turn_time_ms: 30_000,
+                    })
+                    .into(),
+                }),
+            },
+        )
+        .await;
+
+        let match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&s1)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("creator should be in a match")
+        };
+
+        rt.handle_message(
+            s2,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchJoin(MatchJoinData {
+                    match_id: match_id.clone(),
+                    name: "p2".into(),
+                    team: Some(TeamIdx::TEAM_1).into(),
+                }),
+            },
+        )
+        .await;
+
+        // Drain the creator's queue so assertions are about the watch flow.
+        while rx1.try_recv().is_ok() {}
+
+        // Spectator watches the match.
+        rt.handle_message(
+            spec,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchWatch(MatchWatchData {
+                    match_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+
+        // Creator should observe the updated spectator_count via match.update and/or lobby.upsert.
+        let mut saw_match_update = false;
+        let mut saw_lobby_upsert = false;
+
+        for _ in 0..30 {
+            let out = timeout(Duration::from_millis(500), rx1.recv())
+                .await
+                .expect("expected creator outbound message")
+                .expect("rx open");
+
+            match out.msg {
+                S2cMessage::MatchUpdate(MatchUpdateData { match_, .. }) => {
+                    assert_eq!(match_.id, match_id);
+                    assert_eq!(match_.spectator_count, 1);
+                    saw_match_update = true;
+                }
+                S2cMessage::LobbyMatchUpsert(LobbyMatchUpsertData { match_ }) => {
+                    if match_.id == match_id {
+                        assert_eq!(match_.spectator_count, 1);
+                        saw_lobby_upsert = true;
+                    }
+                }
+                _ => {}
+            }
+
+            if saw_match_update && saw_lobby_upsert {
+                break;
+            }
+        }
+
+        assert!(
+            saw_match_update,
+            "expected match.update with spectator_count"
+        );
+        assert!(
+            saw_lobby_upsert,
+            "expected lobby.match.upsert with spectator_count"
+        );
+
+        // Now have the spectator leave and ensure counts drop back to 0.
+        while rx1.try_recv().is_ok() {}
+
+        rt.handle_message(
+            spec,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchLeave(MatchRefData {
+                    match_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+
+        let mut saw_zero = false;
+        for _ in 0..30 {
+            let out = timeout(Duration::from_millis(500), rx1.recv())
+                .await
+                .expect("expected creator outbound message")
+                .expect("rx open");
+
+            match out.msg {
+                S2cMessage::MatchUpdate(MatchUpdateData { match_, .. }) => {
+                    if match_.id == match_id {
+                        assert_eq!(match_.spectator_count, 0);
+                        saw_zero = true;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            saw_zero,
+            "expected match.update reflecting spectator_count=0"
+        );
     }
 
     #[tokio::test]

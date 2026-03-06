@@ -125,6 +125,10 @@ export interface LobbyMatch {
    * Players ordered by seating/turn order (server-defined).
    */
   players: PublicPlayer[];
+  /**
+   * Number of currently connected spectator (watch) sessions.
+   */
+  spectator_count: number;
 }
 export interface MatchOptions {
   /**
@@ -191,6 +195,10 @@ export interface PublicMatch {
    * Players ordered by seating/turn order (server-defined).
    */
   players: PublicPlayer[];
+  /**
+   * Number of currently connected spectator (watch) sessions.
+   */
+  spectator_count: number;
   /**
    * Current match points for teams 0 and 1.
    *

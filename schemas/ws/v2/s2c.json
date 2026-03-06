@@ -386,7 +386,8 @@
         "options",
         "owner_seat_idx",
         "phase",
-        "players"
+        "players",
+        "spectator_count"
       ],
       "properties": {
         "id": {
@@ -411,6 +412,12 @@
           "items": {
             "$ref": "#/definitions/PublicPlayer"
           }
+        },
+        "spectator_count": {
+          "description": "Number of currently connected spectator (watch) sessions.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
         }
       },
       "additionalProperties": false
@@ -757,6 +764,7 @@
         "owner_seat_idx",
         "phase",
         "players",
+        "spectator_count",
         "team_points"
       ],
       "properties": {
@@ -782,6 +790,12 @@
           "items": {
             "$ref": "#/definitions/PublicPlayer"
           }
+        },
+        "spectator_count": {
+          "description": "Number of currently connected spectator (watch) sessions.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
         },
         "team_points": {
           "description": "Current match points for teams 0 and 1.",

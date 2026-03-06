@@ -263,6 +263,7 @@ fn ws_protocol_message_type_strings_are_snake_case_dot_namespaces() {
             ready: false,
         }],
         owner_seat_idx: 0,
+        spectator_count: 0,
     };
 
     let public_match = PublicMatch {
@@ -275,6 +276,7 @@ fn ws_protocol_message_type_strings_are_snake_case_dot_namespaces() {
             ready: false,
         }],
         owner_seat_idx: 0,
+        spectator_count: 0,
         team_points: [0, 0],
     };
 

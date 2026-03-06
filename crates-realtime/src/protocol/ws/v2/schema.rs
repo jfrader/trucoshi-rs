@@ -319,6 +319,9 @@ pub struct LobbyMatch {
 
     /// Seat index (in `players[]`) of the current match owner.
     pub owner_seat_idx: u8,
+
+    /// Number of currently connected spectator (watch) sessions.
+    pub spectator_count: u32,
 }
 
 /// Public match snapshot (protocol v2).
@@ -339,6 +342,9 @@ pub struct PublicMatch {
 
     /// Seat index (in `players[]`) of the current match owner.
     pub owner_seat_idx: u8,
+
+    /// Number of currently connected spectator (watch) sessions.
+    pub spectator_count: u32,
 
     /// Current match points for teams 0 and 1.
     pub team_points: [u8; 2],
