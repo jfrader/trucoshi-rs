@@ -41,6 +41,10 @@ export type S2CMessage =
       type: 'match.left';
     }
   | {
+      data: MatchKickedData;
+      type: 'match.kicked';
+    }
+  | {
       data: GameSnapshotData;
       type: 'game.snapshot';
     }
@@ -132,6 +136,10 @@ export interface LobbyMatch {
 }
 export interface MatchOptions {
   /**
+   * Inactivity window before a disconnected player is removed.
+   */
+  abandon_time_ms?: number;
+  /**
    * Whether Flor is enabled.
    */
   flor: boolean;
@@ -145,6 +153,10 @@ export interface MatchOptions {
    * Protocol v2: enforced as an explicit enum (2/4/6), since Truco is always two teams with equal sizes.
    */
   max_players: 2 | 4 | 6;
+  /**
+   * Minimum grace after a websocket drop before sweeps run.
+   */
+  reconnect_grace_ms?: number;
   /**
    * Turn timer in milliseconds.
    */
@@ -237,6 +249,10 @@ export interface MatchUpdateData {
  */
 export interface MatchLeftData {
   match_id: string;
+}
+export interface MatchKickedData {
+  match_id: string;
+  reason: string;
 }
 export interface GameSnapshotData {
   game: PublicGameState;

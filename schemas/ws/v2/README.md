@@ -76,6 +76,7 @@ All WebSocket frames are JSON objects.
 - `match.start` (C2S)
 - `match.pause` (C2S)
 - `match.resume` (C2S)
+- `match.rematch` (C2S) — restart a finished match into a fresh lobby with the same players/teams
 - `match.snapshot.get` (C2S) → `match.snapshot` (S2C)
 - `match.update` (S2C)
 

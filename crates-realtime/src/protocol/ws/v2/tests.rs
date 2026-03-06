@@ -340,6 +340,9 @@ fn ws_protocol_message_type_strings_are_snake_case_dot_namespaces() {
         type_of(C2sMessage::MatchResume(MatchRefData {
             match_id: "m".into(),
         })),
+        type_of(C2sMessage::MatchRematch(MatchRefData {
+            match_id: "m".into(),
+        })),
         type_of(C2sMessage::ChatJoin(ChatJoinData {
             room_id: "r".into(),
         })),

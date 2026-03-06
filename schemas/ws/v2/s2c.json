@@ -163,6 +163,25 @@
       ],
       "properties": {
         "data": {
+          "$ref": "#/definitions/MatchKickedData"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "match.kicked"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "data",
+        "type"
+      ],
+      "properties": {
+        "data": {
           "$ref": "#/definitions/GameSnapshotData"
         },
         "type": {
@@ -462,6 +481,22 @@
       },
       "additionalProperties": false
     },
+    "MatchKickedData": {
+      "type": "object",
+      "required": [
+        "match_id",
+        "reason"
+      ],
+      "properties": {
+        "match_id": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
     "MatchLeftData": {
       "description": "Confirmation that the client has left a match.\n\nThis exists so `match.leave` does not need any legacy-style \"ok\" quirks.",
       "type": "object",
@@ -484,6 +519,14 @@
         "turn_time_ms"
       ],
       "properties": {
+        "abandon_time_ms": {
+          "description": "Inactivity window before a disconnected player is removed.",
+          "default": 120000,
+          "type": "integer",
+          "format": "int64",
+          "maximum": 600000.0,
+          "minimum": 1.0
+        },
         "flor": {
           "description": "Whether Flor is enabled.",
           "type": "boolean"
@@ -504,6 +547,14 @@
             4,
             6
           ]
+        },
+        "reconnect_grace_ms": {
+          "description": "Minimum grace after a websocket drop before sweeps run.",
+          "default": 5000,
+          "type": "integer",
+          "format": "int64",
+          "maximum": 60000.0,
+          "minimum": 1.0
         },
         "turn_time_ms": {
           "description": "Turn timer in milliseconds.",

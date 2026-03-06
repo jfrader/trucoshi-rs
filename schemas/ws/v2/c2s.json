@@ -232,6 +232,45 @@
       "additionalProperties": false
     },
     {
+      "description": "Restart a finished match into a fresh lobby with the same players/teams.",
+      "type": "object",
+      "required": [
+        "data",
+        "type"
+      ],
+      "properties": {
+        "data": {
+          "$ref": "#/definitions/MatchRefData"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "match.rematch"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "data",
+        "type"
+      ],
+      "properties": {
+        "data": {
+          "$ref": "#/definitions/MatchKickData"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "match.kick"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    {
       "type": "object",
       "required": [
         "data",
@@ -445,6 +484,24 @@
       },
       "additionalProperties": false
     },
+    "MatchKickData": {
+      "type": "object",
+      "required": [
+        "match_id",
+        "seat_idx"
+      ],
+      "properties": {
+        "match_id": {
+          "type": "string"
+        },
+        "seat_idx": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
     "MatchOptions": {
       "type": "object",
       "required": [
@@ -454,6 +511,14 @@
         "turn_time_ms"
       ],
       "properties": {
+        "abandon_time_ms": {
+          "description": "Inactivity window before a disconnected player is removed.",
+          "default": 120000,
+          "type": "integer",
+          "format": "int64",
+          "maximum": 600000.0,
+          "minimum": 1.0
+        },
         "flor": {
           "description": "Whether Flor is enabled.",
           "type": "boolean"
@@ -474,6 +539,14 @@
             4,
             6
           ]
+        },
+        "reconnect_grace_ms": {
+          "description": "Minimum grace after a websocket drop before sweeps run.",
+          "default": 5000,
+          "type": "integer",
+          "format": "int64",
+          "maximum": 60000.0,
+          "minimum": 1.0
         },
         "turn_time_ms": {
           "description": "Turn timer in milliseconds.",

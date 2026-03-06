@@ -56,6 +56,14 @@ export type C2SMessage =
       type: 'match.resume';
     }
   | {
+      data: MatchRefData;
+      type: 'match.rematch';
+    }
+  | {
+      data: MatchKickData;
+      type: 'match.kick';
+    }
+  | {
       data: ChatJoinData;
       type: 'chat.join';
     }
@@ -127,6 +135,10 @@ export interface MatchCreateData {
 }
 export interface MatchOptions {
   /**
+   * Inactivity window before a disconnected player is removed.
+   */
+  abandon_time_ms?: number;
+  /**
    * Whether Flor is enabled.
    */
   flor: boolean;
@@ -140,6 +152,10 @@ export interface MatchOptions {
    * Protocol v2: enforced as an explicit enum (2/4/6), since Truco is always two teams with equal sizes.
    */
   max_players: 2 | 4 | 6;
+  /**
+   * Minimum grace after a websocket drop before sweeps run.
+   */
+  reconnect_grace_ms?: number;
   /**
    * Turn timer in milliseconds.
    */
@@ -165,6 +181,10 @@ export interface MatchRefData {
 export interface MatchReadyData {
   match_id: string;
   ready: boolean;
+}
+export interface MatchKickData {
+  match_id: string;
+  seat_idx: number;
 }
 export interface ChatJoinData {
   room_id: string;

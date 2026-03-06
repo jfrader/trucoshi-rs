@@ -272,6 +272,10 @@ pub enum C2sMessage {
     #[serde(rename = "match.resume")]
     MatchResume(MatchRefData),
 
+    /// Restart a finished match into a fresh lobby with the same players/teams.
+    #[serde(rename = "match.rematch")]
+    MatchRematch(MatchRefData),
+
     #[serde(rename = "match.kick")]
     MatchKick(MatchKickData),
 

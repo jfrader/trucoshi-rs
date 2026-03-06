@@ -1678,6 +1678,320 @@ impl Realtime {
                 }
             }
 
+            C2sMessage::MatchRematch(d) => {
+                let msid = d.match_id;
+
+                let (active_msid, pkey, actor_user_id) = {
+                    let s = self.state.lock().await;
+                    let Some(sess) = s.sessions.get(&session_id) else {
+                        return;
+                    };
+                    (
+                        sess.active_match_id.clone(),
+                        sess.player_key.clone(),
+                        sess.user_id,
+                    )
+                };
+
+                let active_msid = match active_msid {
+                    Some(active_msid) => active_msid,
+                    None => {
+                        self.send_to(
+                            session_id,
+                            Self::err_out(id, "NOT_IN_MATCH", "not in a match"),
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                let pkey = match pkey {
+                    Some(pkey) => pkey,
+                    None => {
+                        self.send_to(
+                            session_id,
+                            Self::err_out(id, "NOT_A_PLAYER", "not a player (spectator)"),
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                if active_msid != msid {
+                    self.send_to(
+                        session_id,
+                        Self::err_out(
+                            id,
+                            "MATCH_MISMATCH",
+                            "message match_id does not match your active match",
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+
+                let now_ms = Self::now_ms();
+                let mut err: Option<(String, String)> = None;
+
+                struct RematchOutputs {
+                    new_match_id: String,
+                    room_moves: Vec<(Uuid, bool)>,
+                    watcher_sessions: Vec<Uuid>,
+                    history_events: Vec<GameHistoryEvent>,
+                    rematch_event: GameHistoryEvent,
+                }
+
+                let mut outputs: Option<RematchOutputs> = None;
+
+                {
+                    let mut s = self.state.lock().await;
+                    let Some(m) = s.matches.get(&msid) else {
+                        self.send_to(
+                            session_id,
+                            Self::err_out(id, "MATCH_NOT_FOUND", "match not found"),
+                        )
+                        .await;
+                        return;
+                    };
+
+                    if m.owner_key != pkey {
+                        err = Some(("NOT_OWNER".into(), "only the owner can rematch".into()));
+                    } else if m.phase != MatchPhase::Finished {
+                        err = Some(("BAD_STATE".into(), "match not finished".into()));
+                    } else {
+                        struct PendingPlayer {
+                            session_id: Uuid,
+                            player: PlayerState,
+                            is_owner: bool,
+                        }
+
+                        let participants = m.participants.clone();
+                        let options = m.options.clone();
+                        let players_snapshot = m.players.clone();
+                        let owner_key = m.owner_key.clone();
+
+                        let mut key_to_session: HashMap<String, Uuid> = HashMap::new();
+                        for (sid, sess) in s.sessions.iter() {
+                            if let Some(pk) = sess.player_key.as_deref() {
+                                key_to_session.insert(pk.to_string(), *sid);
+                            }
+                        }
+
+                        let mut pending_players: Vec<PendingPlayer> = Vec::new();
+                        for player in &players_snapshot {
+                            if let Some(&sid) = key_to_session.get(&player.key) {
+                                let new_key = Uuid::new_v4().to_string();
+                                pending_players.push(PendingPlayer {
+                                    session_id: sid,
+                                    player: PlayerState {
+                                        key: new_key,
+                                        user_id: player.user_id,
+                                        name: player.name.clone(),
+                                        team: player.team,
+                                        ready: false,
+                                        last_active_ms: now_ms,
+                                        disconnected_at_ms: None,
+                                    },
+                                    is_owner: player.key == owner_key,
+                                });
+                            }
+                        }
+
+                        if pending_players.len() < 2 {
+                            err = Some((
+                                "NOT_ENOUGH_PLAYERS".into(),
+                                "need at least 2 connected players".into(),
+                            ));
+                        } else if !pending_players.iter().any(|p| p.is_owner) {
+                            err = Some((
+                                "NOT_OWNER".into(),
+                                "owner must be connected to rematch".into(),
+                            ));
+                        } else {
+                            let new_match_id = Uuid::new_v4().to_string();
+                            let new_players = pending_players
+                                .iter()
+                                .map(|p| p.player.clone())
+                                .collect::<Vec<_>>();
+
+                            let owner_player = pending_players
+                                .iter()
+                                .find(|p| p.is_owner)
+                                .map(|p| p.player.clone())
+                                .expect("owner player missing");
+
+                            let owner_seat_idx_new = new_players
+                                .iter()
+                                .position(|p| p.key == owner_player.key)
+                                .unwrap_or(0);
+
+                            let mut participants_set = HashSet::new();
+                            for pending in &pending_players {
+                                participants_set.insert(pending.session_id);
+                            }
+
+                            let new_match_state = MatchState {
+                                match_id: new_match_id.clone(),
+                                owner_key: owner_player.key.clone(),
+                                options: options.clone(),
+                                phase: MatchPhase::Lobby,
+                                players: new_players.clone(),
+                                participants: participants_set,
+                                team_points: [0, 0],
+                                hand_no: 0,
+                                game: None,
+                                pending_game: None,
+                            };
+
+                            s.matches.remove(&msid);
+                            s.matches.insert(new_match_id.clone(), new_match_state);
+
+                            for pending in &pending_players {
+                                if let Some(sess) = s.sessions.get_mut(&pending.session_id) {
+                                    sess.active_match_id = Some(new_match_id.clone());
+                                    sess.player_key = Some(pending.player.key.clone());
+                                    sess.last_active_ms = now_ms;
+                                }
+                            }
+
+                            let player_session_ids: HashSet<Uuid> =
+                                pending_players.iter().map(|p| p.session_id).collect();
+
+                            let mut watchers: Vec<Uuid> = Vec::new();
+                            for sid in participants {
+                                if !player_session_ids.contains(&sid) {
+                                    if let Some(sess) = s.sessions.get_mut(&sid) {
+                                        if sess.active_match_id.as_deref() == Some(msid.as_str()) {
+                                            sess.active_match_id = None;
+                                            sess.player_key = None;
+                                        }
+                                    }
+                                    watchers.push(sid);
+                                }
+                            }
+
+                            let mut room_moves = pending_players
+                                .iter()
+                                .map(|p| (p.session_id, true))
+                                .collect::<Vec<_>>();
+                            room_moves.extend(watchers.iter().map(|sid| (*sid, false)));
+
+                            let owner_old_idx = players_snapshot
+                                .iter()
+                                .position(|p| p.key == owner_key)
+                                .map(|idx| u8::try_from(idx).unwrap_or(0));
+
+                            let owner_old_team = players_snapshot
+                                .iter()
+                                .find(|p| p.key == owner_key)
+                                .map(|p| p.team.as_u8());
+
+                            let rematch_event = GameHistoryEvent::GameAction {
+                                match_id: msid.clone(),
+                                actor_seat_idx: owner_old_idx,
+                                actor_team_idx: owner_old_team,
+                                actor_user_id,
+                                ty: "match.rematch".into(),
+                                data: serde_json::json!({
+                                    "new_match_id": new_match_id.clone(),
+                                    "player_count": pending_players.len(),
+                                    "server_time_ms": now_ms,
+                                }),
+                            };
+
+                            let match_options =
+                                serde_json::to_value(&options).unwrap_or_else(|_| {
+                                    serde_json::json!({
+                                        "error": "failed_to_serialize_match_options"
+                                    })
+                                });
+
+                            let mut history_events: Vec<GameHistoryEvent> = Vec::new();
+                            history_events.push(GameHistoryEvent::MatchCreated {
+                                match_id: new_match_id.clone(),
+                                server_version: env!("CARGO_PKG_VERSION").to_string(),
+                                protocol_version: 2,
+                                rng_seed: Self::seed_for_hand(&new_match_id, 0) as i64,
+                                options: serde_json::json!({
+                                    "ws_match_id": new_match_id.clone(),
+                                    "match_options": match_options,
+                                }),
+                                owner: HistoryPlayer {
+                                    seat_idx: u8::try_from(owner_seat_idx_new).unwrap_or(0),
+                                    team_idx: owner_player.team.as_u8(),
+                                    user_id: owner_player.user_id,
+                                    display_name: owner_player.name.clone(),
+                                },
+                            });
+
+                            for (seat_idx, player) in new_players.iter().enumerate() {
+                                if player.key == owner_player.key {
+                                    continue;
+                                }
+                                history_events.push(GameHistoryEvent::PlayerJoined {
+                                    match_id: new_match_id.clone(),
+                                    seat_idx: u8::try_from(seat_idx).unwrap_or(0),
+                                    team_idx: player.team.as_u8(),
+                                    user_id: player.user_id,
+                                    display_name: player.name.clone(),
+                                });
+                            }
+
+                            outputs = Some(RematchOutputs {
+                                new_match_id,
+                                room_moves,
+                                watcher_sessions: watchers,
+                                history_events,
+                                rematch_event,
+                            });
+                        }
+                    }
+                }
+
+                if let Some((code, msg)) = err {
+                    self.send_to(session_id, Self::err_out(id, code, msg)).await;
+                    return;
+                }
+
+                let Some(outputs) = outputs else {
+                    return;
+                };
+
+                for sid in &outputs.watcher_sessions {
+                    self.send_to(
+                        *sid,
+                        WsOutMessage {
+                            v: Default::default(),
+                            msg: S2cMessage::MatchLeft(MatchLeftData {
+                                match_id: msid.clone(),
+                            }),
+                            id: Default::default(),
+                        },
+                    )
+                    .await;
+                }
+
+                for (sid, join_new) in &outputs.room_moves {
+                    self.leave_room_internal(*sid, &msid).await;
+                    if *join_new {
+                        self.join_room_internal(*sid, &outputs.new_match_id).await;
+                    }
+                }
+
+                self.emit_history(outputs.rematch_event);
+                for ev in outputs.history_events {
+                    self.emit_history(ev);
+                }
+
+                let correlated = id.clone().map(|id| (session_id, id));
+                self.emit_match_snapshot_to_match(&outputs.new_match_id, correlated)
+                    .await;
+
+                self.broadcast_lobby_match_remove(&msid).await;
+                self.broadcast_lobby_match_upsert(&outputs.new_match_id)
+                    .await;
+            }
+
             C2sMessage::MatchKick(d) => {
                 let msid = d.match_id;
                 let target_seat = usize::from(d.seat_idx);
@@ -2917,6 +3231,125 @@ mod e2e_smoke_tests {
         }
 
         None
+    }
+    async fn run_match_to_completion(rt: &Realtime, owner: Uuid, player: Uuid) -> String {
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchCreate(MatchCreateData {
+                    name: "p1".into(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                    options: Some(MatchOptions {
+                        max_players: 2,
+                        match_points: 1,
+                        turn_time_ms: 30_000,
+                        ..MatchOptions::default()
+                    })
+                    .into(),
+                }),
+            },
+        )
+        .await;
+
+        let match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&owner)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("owner should be in a match")
+        };
+
+        rt.handle_message(
+            player,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchJoin(MatchJoinData {
+                    match_id: match_id.clone(),
+                    name: "p2".into(),
+                    team: Some(TeamIdx::TEAM_1).into(),
+                }),
+            },
+        )
+        .await;
+
+        for (sid, ready) in [(owner, true), (player, true)] {
+            rt.handle_message(
+                sid,
+                WsInMessage {
+                    v: Default::default(),
+                    id: Default::default(),
+                    msg: C2sMessage::MatchReady(MatchReadyData {
+                        match_id: match_id.clone(),
+                        ready,
+                    }),
+                },
+            )
+            .await;
+        }
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchStart(MatchRefData {
+                    match_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+
+        loop {
+            let (phase, turn_session_id, hand_len) = {
+                let s = rt.state.lock().await;
+                let m = s
+                    .matches
+                    .get(&match_id)
+                    .unwrap_or_else(|| panic!("match not found: {match_id}"));
+
+                let phase = m.phase;
+                if phase == MatchPhase::Finished {
+                    (phase, owner, 0)
+                } else {
+                    let g = m.game.as_ref().expect("game state initialized");
+                    let turn_seat_idx = g.public.turn_seat_idx as usize;
+                    let key = m.players[turn_seat_idx].key.clone();
+                    let turn_session_id = *s
+                        .sessions
+                        .iter()
+                        .find_map(|(sid, sess)| {
+                            (sess.player_key.as_deref() == Some(key.as_str())).then_some(sid)
+                        })
+                        .expect("session for current turn");
+                    let hand_len = g.hands().get(turn_seat_idx).map(|h| h.len()).unwrap_or(0);
+                    (phase, turn_session_id, hand_len)
+                }
+            };
+
+            if phase == MatchPhase::Finished {
+                break;
+            }
+
+            assert!(hand_len > 0, "turn player should have cards");
+
+            rt.handle_message(
+                turn_session_id,
+                WsInMessage {
+                    v: Default::default(),
+                    id: Default::default(),
+                    msg: C2sMessage::GamePlayCard(GamePlayCardData {
+                        match_id: match_id.clone(),
+                        card_idx: 0,
+                    }),
+                },
+            )
+            .await;
+        }
+
+        match_id
     }
 
     #[tokio::test]
@@ -4519,5 +4952,198 @@ mod e2e_smoke_tests {
 
         assert!(saw_watch, "expected SpectatorJoined history event");
         assert!(saw_unwatch, "expected SpectatorLeft history event");
+    }
+
+    #[tokio::test]
+    async fn rematch_spawns_new_lobby_with_same_players() {
+        let rt = Realtime::new();
+        let (owner, _rx_owner) = add_session(&rt, 900).await;
+        let (player, _rx_player) = add_session(&rt, 901).await;
+
+        let match_id = run_match_to_completion(&rt, owner, player).await;
+
+        let (old_owner_key, old_player_key) = {
+            let s = rt.state.lock().await;
+            let m = s.matches.get(&match_id).expect("match exists");
+            let owner_key = m.owner_key.clone();
+            let other_key = m
+                .players
+                .iter()
+                .find(|p| p.key != owner_key)
+                .map(|p| p.key.clone())
+                .expect("second player key");
+            (owner_key, other_key)
+        };
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchRematch(MatchRefData {
+                    match_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+
+        let (_new_match_id, new_owner_key, new_player_key, new_players) = {
+            let s = rt.state.lock().await;
+            assert!(
+                s.matches.get(&match_id).is_none(),
+                "old match should be removed"
+            );
+            let owner_sess = s.sessions.get(&owner).expect("owner session");
+            let player_sess = s.sessions.get(&player).expect("player session");
+            let new_match_id = owner_sess
+                .active_match_id
+                .clone()
+                .expect("owner moved to new match");
+            assert_eq!(
+                player_sess.active_match_id.as_deref(),
+                Some(new_match_id.as_str())
+            );
+            let new_match = s.matches.get(&new_match_id).expect("new match");
+            assert_eq!(new_match.phase, MatchPhase::Lobby);
+            assert_eq!(new_match.team_points, [0, 0]);
+            assert!(new_match.game.is_none());
+            assert!(new_match.players.iter().all(|p| !p.ready));
+            (
+                new_match_id,
+                owner_sess.player_key.clone().expect("owner key"),
+                player_sess.player_key.clone().expect("player key"),
+                new_match.players.clone(),
+            )
+        };
+
+        assert_ne!(new_owner_key, old_owner_key, "owner key should rotate");
+        assert_ne!(new_player_key, old_player_key, "player key should rotate");
+        assert_eq!(new_players.len(), 2);
+        let names: Vec<_> = new_players.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"p1"));
+        assert!(names.contains(&"p2"));
+    }
+
+    #[tokio::test]
+    async fn rematch_requires_owner() {
+        let rt = Realtime::new();
+        let (owner, _rx_owner) = add_session(&rt, 910).await;
+        let (player, mut rx_player) = add_session(&rt, 911).await;
+
+        let match_id = run_match_to_completion(&rt, owner, player).await;
+
+        drain_receiver(&mut rx_player);
+
+        rt.handle_message(
+            player,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchRematch(MatchRefData {
+                    match_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+
+        let err = recv_error(&mut rx_player)
+            .await
+            .expect("expected NOT_OWNER error");
+        assert_eq!(err.code, "NOT_OWNER");
+    }
+
+    #[tokio::test]
+    async fn rematch_requires_finished_match() {
+        let rt = Realtime::new();
+        let (owner, mut rx_owner) = add_session(&rt, 920).await;
+        let (player, _rx_player) = add_session(&rt, 921).await;
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchCreate(MatchCreateData {
+                    name: "p1".into(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                    options: Some(MatchOptions {
+                        max_players: 2,
+                        match_points: 1,
+                        turn_time_ms: 30_000,
+                        ..MatchOptions::default()
+                    })
+                    .into(),
+                }),
+            },
+        )
+        .await;
+
+        let match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&owner)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("match id")
+        };
+
+        rt.handle_message(
+            player,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchJoin(MatchJoinData {
+                    match_id: match_id.clone(),
+                    name: "p2".into(),
+                    team: Some(TeamIdx::TEAM_1).into(),
+                }),
+            },
+        )
+        .await;
+
+        for (sid, ready) in [(owner, true), (player, true)] {
+            rt.handle_message(
+                sid,
+                WsInMessage {
+                    v: Default::default(),
+                    id: Default::default(),
+                    msg: C2sMessage::MatchReady(MatchReadyData {
+                        match_id: match_id.clone(),
+                        ready,
+                    }),
+                },
+            )
+            .await;
+        }
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchStart(MatchRefData {
+                    match_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+
+        drain_receiver(&mut rx_owner);
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchRematch(MatchRefData {
+                    match_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+
+        let err = recv_error(&mut rx_owner)
+            .await
+            .expect("expected BAD_STATE error");
+        assert_eq!(err.code, "BAD_STATE");
     }
 }
