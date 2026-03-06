@@ -471,33 +471,23 @@ impl GameState {
                 .filter(|r| r.len() >= players_len)
                 .collect::<Vec<_>>();
 
-            let mut trick_wins = [0u8, 0u8];
+            // Resolve hand winner using Truco tie-breaking semantics.
+            //
+            // A pure win-count approach ("first to 2") is incorrect in Truco because ties carry
+            // precedence. Example: 1st trick tie + 2nd trick win ends the hand immediately.
+            let mut trick_results: Vec<Option<u8>> = Vec::new();
             for r in &completed_rounds {
                 let (winner_team, _winner_player) = trick_winner(r, teams_by_player_idx);
-                if let Some(t) = winner_team {
-                    if t < 2 {
-                        trick_wins[t as usize] = trick_wins[t as usize].saturating_add(1);
-                    }
-                }
+                let winner_team = winner_team.and_then(|t| if t < 2 { Some(t) } else { None });
+                trick_results.push(winner_team);
             }
 
-            let mut hand_winner: Option<u8> = None;
-            if trick_wins[0] >= 2 {
-                hand_winner = Some(0);
-            } else if trick_wins[1] >= 2 {
-                hand_winner = Some(1);
-            } else if completed_rounds.len() >= 3 {
-                // Best-effort resolution for a fully-played hand.
-                hand_winner = match trick_wins[0].cmp(&trick_wins[1]) {
-                    std::cmp::Ordering::Greater => Some(0),
-                    std::cmp::Ordering::Less => Some(1),
-                    std::cmp::Ordering::Equal => {
-                        // Tie: award to forehand's team.
-                        let forehand_idx = self.public.forehand_seat_idx as usize;
-                        teams_by_player_idx.get(forehand_idx).copied()
-                    }
-                };
-            }
+            let forehand_team_idx = teams_by_player_idx
+                .get(self.public.forehand_seat_idx as usize)
+                .copied()
+                .unwrap_or(0);
+
+            let hand_winner = resolve_hand_winner(&trick_results, forehand_team_idx);
 
             if let Some(winner_team_idx) = hand_winner {
                 let points = self.truco_value.clamp(1, 4);
@@ -675,6 +665,64 @@ pub fn trick_winner(played: &[PlayedCard], teams_by_player_idx: &[u8]) -> (Optio
     (winner_team_idx, Some(winner_player_idx))
 }
 
+/// Resolve the hand winner from completed trick outcomes, following Truco tie-breaking rules.
+///
+/// `trick_results` are in chronological order, with:
+/// - `Some(team_idx)` when a team won the trick
+/// - `None` when the trick was tied
+///
+/// Returns `Some(team_idx)` as soon as the winner is determined, or `None` if the hand must
+/// continue.
+fn resolve_hand_winner(trick_results: &[Option<u8>], forehand_team_idx: u8) -> Option<u8> {
+    let forehand_team_idx = if forehand_team_idx < 2 {
+        forehand_team_idx
+    } else {
+        0
+    };
+
+    let t1 = trick_results.get(0).copied().flatten();
+    let t2 = trick_results.get(1).copied().flatten();
+
+    // After 1 trick, never resolved.
+    if trick_results.len() < 2 {
+        return None;
+    }
+
+    // After 2 tricks:
+    // - win + win => winner
+    // - win + tie => winner
+    // - tie + win => winner
+    // - tie + tie => continue
+    // - win + loss => continue
+    if let Some(a) = t1 {
+        if t2 == Some(a) || trick_results.get(1).copied().unwrap_or(None).is_none() {
+            return Some(a);
+        }
+    } else if let Some(a) = t2 {
+        // First trick tie, second trick win.
+        return Some(a);
+    }
+
+    // Need 3 tricks.
+    if trick_results.len() < 3 {
+        return None;
+    }
+
+    let t3 = trick_results.get(2).copied().flatten();
+
+    if let Some(a) = t3 {
+        return Some(a);
+    }
+
+    // Third trick tie: winner is the winner of the first trick, or forehand's team if the first
+    // trick was also tied.
+    if let Some(a) = t1 {
+        Some(a)
+    } else {
+        Some(forehand_team_idx)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -703,6 +751,30 @@ mod tests {
         let teams = vec![0u8, 1u8];
         let (t, p) = trick_winner(&played, &teams);
         assert_eq!((t, p), (None, None));
+    }
+
+    #[test]
+    fn resolve_hand_winner_applies_truco_tie_break_rules() {
+        // First trick tie + second trick win ends the hand.
+        assert_eq!(resolve_hand_winner(&[None, Some(1)], 0), Some(1));
+
+        // Win + tie ends the hand for the first trick winner.
+        assert_eq!(resolve_hand_winner(&[Some(0), None], 1), Some(0));
+
+        // Win + loss requires a third trick.
+        assert_eq!(resolve_hand_winner(&[Some(0), Some(1)], 0), None);
+
+        // If each team wins one and the third is tied, the first trick winner wins.
+        assert_eq!(resolve_hand_winner(&[Some(0), Some(1), None], 1), Some(0));
+
+        // Full tie: forehand's team wins.
+        assert_eq!(resolve_hand_winner(&[None, None, None], 1), Some(1));
+
+        // Third trick winner wins.
+        assert_eq!(
+            resolve_hand_winner(&[Some(0), Some(1), Some(1)], 0),
+            Some(1)
+        );
     }
 
     #[test]
