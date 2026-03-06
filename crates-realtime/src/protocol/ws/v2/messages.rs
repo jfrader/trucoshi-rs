@@ -127,7 +127,8 @@ pub struct LobbySnapshotData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LobbyMatchUpsertData {
-    pub r#match: LobbyMatch,
+    #[serde(rename = "match")]
+    pub match_: LobbyMatch,
 }
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
@@ -142,7 +143,8 @@ pub struct LobbyMatchRemoveData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MatchSnapshotData {
-    pub r#match: PublicMatch,
+    #[serde(rename = "match")]
+    pub match_: PublicMatch,
 
     #[serde(default, skip_serializing_if = "Maybe::is_none")]
     pub me: Maybe<PrivatePlayer>,
@@ -152,7 +154,8 @@ pub struct MatchSnapshotData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MatchUpdateData {
-    pub r#match: PublicMatch,
+    #[serde(rename = "match")]
+    pub match_: PublicMatch,
 
     #[serde(default, skip_serializing_if = "Maybe::is_none")]
     pub me: Maybe<PrivatePlayer>,

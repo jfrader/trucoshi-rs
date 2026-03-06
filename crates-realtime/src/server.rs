@@ -1014,9 +1014,7 @@ impl Realtime {
                 targets,
                 WsOutMessage {
                     v: Default::default(),
-                    msg: S2cMessage::LobbyMatchUpsert(LobbyMatchUpsertData {
-                        r#match: match_info,
-                    }),
+                    msg: S2cMessage::LobbyMatchUpsert(LobbyMatchUpsertData { match_: match_info }),
                     id: Default::default(),
                 },
             )
@@ -1173,7 +1171,7 @@ impl Realtime {
             WsOutMessage {
                 v: Default::default(),
                 msg: S2cMessage::MatchSnapshot(MatchSnapshotData {
-                    r#match: match_data,
+                    match_: match_data,
                     me,
                 }),
                 id: id.clone().into(),
@@ -1267,7 +1265,7 @@ impl Realtime {
             WsOutMessage {
                 v: Default::default(),
                 msg: S2cMessage::MatchUpdate(MatchUpdateData {
-                    r#match: match_data,
+                    match_: match_data,
                     me,
                 }),
                 id: id.into(),
