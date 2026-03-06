@@ -644,6 +644,7 @@ impl Realtime {
                 }
 
                 let now_ms = Self::now_ms();
+                let mut err: Option<(String, String)> = None;
                 let mut history_action: Option<GameHistoryEvent> = None;
                 {
                     let mut s = self.state.lock().await;
@@ -651,13 +652,16 @@ impl Realtime {
                         // The match may have been removed (e.g. last player left).
                         self.send_to(
                             session_id,
-                            Self::err_out(id, "MATCH_NOT_FOUND", "match not found"),
+                            Self::err_out(id.clone(), "MATCH_NOT_FOUND", "match not found"),
                         )
                         .await;
                         return;
                     };
 
-                    if let Some(seat_idx) = m.players.iter().position(|p| p.key == pkey) {
+                    // v2: readiness only applies in lobby phase.
+                    if m.phase != MatchPhase::Lobby {
+                        err = Some(("BAD_STATE".into(), "match not in lobby".into()));
+                    } else if let Some(seat_idx) = m.players.iter().position(|p| p.key == pkey) {
                         if let Some(p) = m.players.get_mut(seat_idx) {
                             p.ready = ready;
                             history_action = Some(GameHistoryEvent::GameAction {
@@ -678,6 +682,12 @@ impl Realtime {
                     // until the owner successfully starts the match.
                     //
                     // (We intentionally avoid encoding readiness into `PublicMatch.phase`.)
+                }
+
+                if let Some((code, msg)) = err {
+                    self.send_to(session_id, Self::err_out(id.clone(), code, msg))
+                        .await;
+                    return;
                 }
 
                 if let Some(ev) = history_action.take() {
@@ -2715,6 +2725,118 @@ mod e2e_smoke_tests {
         match out.msg {
             S2cMessage::Error(ErrorPayload { code, .. }) => {
                 assert_eq!(code, "NOT_A_PLAYER");
+            }
+            other => panic!("expected error payload; got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn match_ready_is_rejected_after_match_start() {
+        use tokio::time::{Duration, timeout};
+
+        let rt = Realtime::new();
+
+        let (s1, _rx1) = add_session(&rt, -1).await;
+        let (s2, mut rx2) = add_session(&rt, -2).await;
+
+        // Create + join a 2-player match.
+        rt.handle_message(
+            s1,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchCreate(MatchCreateData {
+                    name: "p1".into(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                    options: Some(MatchOptions {
+                        max_players: 2,
+                        flor: true,
+                        match_points: 1,
+                        turn_time_ms: 30_000,
+                    })
+                    .into(),
+                }),
+            },
+        )
+        .await;
+
+        let match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&s1)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("creator should be in a match")
+        };
+
+        rt.handle_message(
+            s2,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchJoin(MatchJoinData {
+                    match_id: match_id.clone(),
+                    name: "p2".into(),
+                    team: Some(TeamIdx::TEAM_1).into(),
+                }),
+            },
+        )
+        .await;
+
+        // Ready both clients and start.
+        for (sid, ready) in [(s1, true), (s2, true)] {
+            rt.handle_message(
+                sid,
+                WsInMessage {
+                    v: Default::default(),
+                    id: Default::default(),
+                    msg: C2sMessage::MatchReady(MatchReadyData {
+                        match_id: match_id.clone(),
+                        ready,
+                    }),
+                },
+            )
+            .await;
+        }
+
+        rt.handle_message(
+            s1,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchStart(MatchRefData {
+                    match_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+
+        // Drain any prior broadcasts to s2.
+        while rx2.try_recv().is_ok() {}
+
+        // After the match is started, `match.ready` is no longer valid.
+        rt.handle_message(
+            s2,
+            WsInMessage {
+                v: Default::default(),
+                id: Some("corr_ready_after_start".to_string()).into(),
+                msg: C2sMessage::MatchReady(MatchReadyData {
+                    match_id: match_id.clone(),
+                    ready: false,
+                }),
+            },
+        )
+        .await;
+
+        let out = timeout(Duration::from_millis(250), rx2.recv())
+            .await
+            .expect("expected error response")
+            .expect("rx open");
+
+        assert_eq!(out.id.0.as_deref(), Some("corr_ready_after_start"));
+
+        match out.msg {
+            S2cMessage::Error(ErrorPayload { code, .. }) => {
+                assert_eq!(code, "BAD_STATE");
             }
             other => panic!("expected error payload; got {other:?}"),
         }
