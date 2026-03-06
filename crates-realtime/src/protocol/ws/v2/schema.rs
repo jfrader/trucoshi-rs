@@ -258,6 +258,14 @@ fn schema_match_max_players(
     Schema::Object(obj)
 }
 
+fn default_abandon_time_ms() -> i64 {
+    120_000
+}
+
+fn default_reconnect_grace_ms() -> i64 {
+    5_000
+}
+
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -283,6 +291,16 @@ pub struct MatchOptions {
     /// Turn timer in milliseconds.
     #[cfg_attr(feature = "json-schema", schemars(range(min = 1, max = 600_000)))]
     pub turn_time_ms: i64,
+
+    /// Inactivity window before a disconnected player is removed.
+    #[serde(default = "default_abandon_time_ms")]
+    #[cfg_attr(feature = "json-schema", schemars(range(min = 1, max = 600_000)))]
+    pub abandon_time_ms: i64,
+
+    /// Minimum grace after a websocket drop before sweeps run.
+    #[serde(default = "default_reconnect_grace_ms")]
+    #[cfg_attr(feature = "json-schema", schemars(range(min = 1, max = 60_000)))]
+    pub reconnect_grace_ms: i64,
 }
 
 impl Default for MatchOptions {
@@ -292,6 +310,8 @@ impl Default for MatchOptions {
             flor: true,
             match_points: 9,
             turn_time_ms: 30_000,
+            abandon_time_ms: default_abandon_time_ms(),
+            reconnect_grace_ms: default_reconnect_grace_ms(),
         }
     }
 }

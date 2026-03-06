@@ -63,6 +63,14 @@ pub struct MatchRefData {
     pub match_id: String,
 }
 
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MatchKickData {
+    pub match_id: String,
+    pub seat_idx: u8,
+}
+
 /// Join a match as a spectator (does not occupy a player seat).
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +190,14 @@ pub struct MatchLeftData {
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct MatchKickedData {
+    pub match_id: String,
+    pub reason: String,
+}
+
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GameSnapshotData {
     pub match_id: String,
     pub game: PublicGameState,
@@ -256,6 +272,9 @@ pub enum C2sMessage {
     #[serde(rename = "match.resume")]
     MatchResume(MatchRefData),
 
+    #[serde(rename = "match.kick")]
+    MatchKick(MatchKickData),
+
     #[serde(rename = "chat.join")]
     ChatJoin(ChatJoinData),
 
@@ -298,6 +317,9 @@ pub enum S2cMessage {
 
     #[serde(rename = "match.left")]
     MatchLeft(MatchLeftData),
+
+    #[serde(rename = "match.kicked")]
+    MatchKicked(MatchKickedData),
 
     #[serde(rename = "game.snapshot")]
     GameSnapshot(GameSnapshotData),
