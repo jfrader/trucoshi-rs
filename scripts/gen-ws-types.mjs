@@ -2,6 +2,8 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { compile } from 'json-schema-to-typescript';
 
+const CHECK = process.argv.includes('--check');
+
 async function genOne({ inPath, outPath, rootName, banner }) {
   const raw = await readFile(inPath, 'utf8');
   const schema = JSON.parse(raw);
@@ -24,6 +26,22 @@ async function genOne({ inPath, outPath, rootName, banner }) {
   // For our protocol types, this is just noise; collapse to `string`.
   ts = ts.replace(/^export type String = string;\n/m, '');
   ts = ts.replace(/\bString\b/g, 'string');
+
+  if (CHECK) {
+    let onDisk = null;
+    try {
+      onDisk = await readFile(outPath, 'utf8');
+    } catch {
+      onDisk = null;
+    }
+
+    if (onDisk !== ts) {
+      console.error(`${outPath} is out of date; run: npm run gen:ws:types`);
+      process.exitCode = 1;
+    }
+
+    return;
+  }
 
   await mkdir(dirname(outPath), { recursive: true });
   await writeFile(outPath, ts, 'utf8');
@@ -66,6 +84,13 @@ await genOne({
   banner,
 });
 
-console.log(
-  'Generated schemas/ws/v2/in.ts, out.ts, c2s.ts, and s2c.ts (from JSON Schemas)'
-);
+if (CHECK) {
+  if (process.exitCode && process.exitCode !== 0) {
+    process.exit(process.exitCode);
+  }
+  console.log('WS v2 TypeScript types are up to date.');
+} else {
+  console.log(
+    'Generated schemas/ws/v2/in.ts, out.ts, c2s.ts, and s2c.ts (from JSON Schemas)'
+  );
+}

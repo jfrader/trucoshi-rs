@@ -164,4 +164,30 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn ws_v2_typescript_files_are_up_to_date() {
+        // The JSON schema drift check above ensures schemas/ws/v2/*.json are in sync with
+        // `ws_schema_v2` (Rust). This adds a second guard for the generated TypeScript
+        // types under schemas/ws/v2/*.ts.
+        let root = repo_root();
+
+        let script = root.join("scripts/gen-ws-types.mjs");
+        assert!(script.exists(), "expected {script:?} to exist");
+
+        let output = std::process::Command::new("node")
+            .current_dir(&root)
+            .arg(script)
+            .arg("--check")
+            .output()
+            .expect("run node scripts/gen-ws-types.mjs --check");
+
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            panic!(
+                "schemas/ws/v2/*.ts is out of date; run: npm run gen:ws\n\nstdout:\n{stdout}\n\nstderr:\n{stderr}"
+            );
+        }
+    }
 }
