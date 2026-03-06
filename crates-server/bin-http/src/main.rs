@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{FromRequestParts, State, ws::WebSocketUpgrade},
+    extract::{FromRequestParts, Path, Query, State, ws::WebSocketUpgrade},
     http::{HeaderMap, StatusCode, request::Parts},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -124,6 +124,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/auth/me", get(me))
         .route("/v1/auth/refresh-tokens", post(refresh_tokens))
         .route("/v1/auth/logout", post(logout))
+        // ===== Tournaments (no wallets/bets) =====
+        .route(
+            "/v1/tournaments",
+            get(list_tournaments).post(create_tournament),
+        )
+        .route("/v1/tournaments/:id/entries", post(join_tournament))
         .route("/v1/auth/twitter", get(twitter_start))
         .route("/v1/auth/twitter/callback", get(twitter_callback))
         .layer(TraceLayer::new_for_http())
@@ -500,6 +506,104 @@ fn get_cookie_value(headers: &HeaderMap, cookie_name: &str) -> Option<String> {
         }
     }
     None
+}
+
+// ===== Tournaments (minimal; no wallets/bets) =====
+
+#[derive(Debug, Deserialize)]
+struct ListTournamentsQuery {
+    #[serde(default = "default_tournament_limit")]
+    limit: i64,
+}
+
+fn default_tournament_limit() -> i64 {
+    20
+}
+
+async fn list_tournaments(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ListTournamentsQuery>,
+) -> Result<Json<Vec<trucoshi_server::tournaments::types::Tournament>>, ApiError> {
+    let repo = trucoshi_server::tournaments::repo::TournamentsRepo::new(state.store.pool.clone());
+    let limit = q.limit.clamp(1, 200);
+    let list = repo
+        .list_open_tournaments(limit)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(list))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateTournamentRequest {
+    name: String,
+    max_players: i32,
+    starts_at: Option<OffsetDateTime>,
+}
+
+async fn create_tournament(
+    State(state): State<Arc<AppState>>,
+    AuthedUser { user_id }: AuthedUser,
+    Json(req): Json<CreateTournamentRequest>,
+) -> Result<
+    (
+        StatusCode,
+        Json<trucoshi_server::tournaments::types::Tournament>,
+    ),
+    ApiError,
+> {
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::bad_request("name required"));
+    }
+    if req.max_players < 2 {
+        return Err(ApiError::bad_request("max_players must be >= 2"));
+    }
+
+    let repo = trucoshi_server::tournaments::repo::TournamentsRepo::new(state.store.pool.clone());
+    let t = repo
+        .create_tournament(Some(user_id), name, req.max_players, req.starts_at)
+        .await
+        .map_err(ApiError::internal)?;
+
+    Ok((StatusCode::CREATED, Json(t)))
+}
+
+#[derive(Debug, Deserialize)]
+struct JoinTournamentRequest {
+    display_name: String,
+}
+
+async fn join_tournament(
+    State(state): State<Arc<AppState>>,
+    AuthedUser { user_id }: AuthedUser,
+    Path(id): Path<i64>,
+    Json(req): Json<JoinTournamentRequest>,
+) -> Result<
+    (
+        StatusCode,
+        Json<trucoshi_server::tournaments::types::TournamentEntry>,
+    ),
+    ApiError,
+> {
+    let display_name = req.display_name.trim();
+    if display_name.is_empty() {
+        return Err(ApiError::bad_request("display_name required"));
+    }
+
+    let repo = trucoshi_server::tournaments::repo::TournamentsRepo::new(state.store.pool.clone());
+    let entry = repo
+        .add_entry(id, Some(user_id), display_name)
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("duplicate") || msg.contains("UNIQUE") {
+                ApiError::bad_request("already joined")
+            } else {
+                ApiError::internal(e)
+            }
+        })?;
+
+    Ok((StatusCode::CREATED, Json(entry)))
 }
 
 // ===== Twitter (placeholders) =====
