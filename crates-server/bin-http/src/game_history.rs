@@ -354,7 +354,7 @@ pub async fn run_game_history_worker<B: GameHistoryBackend>(
                     .gh_append_event(
                         db_id,
                         seq,
-                        Some(i32::from(actor_seat_idx)),
+                        actor_seat_idx.map(|idx| i32::from(idx)),
                         db_user_id(actor_user_id),
                         event_type.as_str(),
                         payload,
@@ -539,8 +539,8 @@ mod tests {
 
         tx.send(GameHistoryEvent::GameAction {
             match_id: "m1".into(),
-            actor_seat_idx: 0,
-            actor_team_idx: 0,
+            actor_seat_idx: Some(0),
+            actor_team_idx: Some(0),
             actor_user_id: -1,
             ty: "game.play_card".into(),
             data: json!({ "card_idx": 0, "hand_no": 0 }),
@@ -669,8 +669,8 @@ mod tests {
 
         tx.send(GameHistoryEvent::GameAction {
             match_id: "m1".into(),
-            actor_seat_idx: 0,
-            actor_team_idx: 0,
+            actor_seat_idx: Some(0),
+            actor_team_idx: Some(0),
             actor_user_id: 42,
             ty: "match.ready".into(),
             data: json!({ "ready": true }),

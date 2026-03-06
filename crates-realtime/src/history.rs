@@ -54,8 +54,8 @@ pub enum GameHistoryEvent {
     /// Stored as a row in `game_match_events` with `type=ty` and `data` as provided.
     GameAction {
         match_id: String,
-        actor_seat_idx: u8,
-        actor_team_idx: u8,
+        actor_seat_idx: Option<u8>,
+        actor_team_idx: Option<u8>,
         actor_user_id: i64,
         ty: String,
         data: Value,
