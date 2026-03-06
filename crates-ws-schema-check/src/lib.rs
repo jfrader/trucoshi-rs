@@ -96,6 +96,39 @@ mod tests {
         s.split('.').all(is_valid_seg)
     }
 
+    fn is_valid_ws_v2_field_name(s: &str) -> bool {
+        // Snake_case field name, e.g. "match_id".
+        // - must start/end with [a-z0-9]
+        // - allowed chars: [a-z0-9_]
+        // - no consecutive underscores
+        if s.is_empty() {
+            return false;
+        }
+
+        let b = s.as_bytes();
+        let is_alnum = |c: u8| matches!(c, b'a'..=b'z' | b'0'..=b'9');
+
+        if !is_alnum(b[0]) || !is_alnum(b[b.len() - 1]) {
+            return false;
+        }
+
+        let mut prev_underscore = false;
+        for &c in b {
+            match c {
+                b'a'..=b'z' | b'0'..=b'9' => prev_underscore = false,
+                b'_' => {
+                    if prev_underscore {
+                        return false;
+                    }
+                    prev_underscore = true;
+                }
+                _ => return false,
+            }
+        }
+
+        true
+    }
+
     fn collect_message_types(schema: &serde_json::Value) -> std::collections::BTreeSet<String> {
         // Collect `properties.type.enum[]` values across all schema branches.
         fn walk(v: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
@@ -162,6 +195,68 @@ mod tests {
                     "invalid ws v2 message type {t:?} in schemas/ws/v2/{filename}"
                 );
             }
+        }
+    }
+
+    fn assert_properties_and_required_are_strict_snake_case(
+        v: &serde_json::Value,
+        filename: &str,
+        json_path: &str,
+    ) {
+        match v {
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::Object(props)) = map.get("properties") {
+                    let prop_names: std::collections::BTreeSet<&str> =
+                        props.keys().map(|k| k.as_str()).collect();
+
+                    for name in props.keys() {
+                        assert!(
+                            is_valid_ws_v2_field_name(name),
+                            "invalid ws v2 field name {name:?} in schemas/ws/v2/{filename} at {json_path}/properties"
+                        );
+                    }
+
+                    if let Some(serde_json::Value::Array(required)) = map.get("required") {
+                        for r in required {
+                            let serde_json::Value::String(name) = r else {
+                                continue;
+                            };
+
+                            assert!(
+                                is_valid_ws_v2_field_name(name),
+                                "invalid ws v2 required field name {name:?} in schemas/ws/v2/{filename} at {json_path}/required"
+                            );
+
+                            assert!(
+                                prop_names.contains(name.as_str()),
+                                "schemas/ws/v2/{filename}: required field {name:?} is missing from properties at {json_path}"
+                            );
+                        }
+                    }
+                }
+
+                for (k, v) in map {
+                    let child_path = format!("{json_path}/{k}");
+                    assert_properties_and_required_are_strict_snake_case(v, filename, &child_path);
+                }
+            }
+            serde_json::Value::Array(xs) => {
+                for (i, x) in xs.iter().enumerate() {
+                    let child_path = format!("{json_path}[{i}]");
+                    assert_properties_and_required_are_strict_snake_case(x, filename, &child_path);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn ws_v2_schema_property_names_are_strict_snake_case() {
+        let root = repo_root();
+
+        for filename in ["in.json", "out.json", "c2s.json", "s2c.json"] {
+            let schema = read_json(&root.join("schemas/ws/v2").join(filename));
+            assert_properties_and_required_are_strict_snake_case(&schema, filename, "$");
         }
     }
 
