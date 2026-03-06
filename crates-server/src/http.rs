@@ -150,21 +150,29 @@ async fn ws_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    // Access token required for WS.
+    // v2 WS: allow both authenticated and guest connections.
+    //
+    // If an access token is provided and valid, we use the real user id.
+    // Otherwise we assign an ephemeral negative id to keep the rest of the
+    // realtime layer simple (and keep auth endpoints unchanged).
     let bearer = headers
         .typed_get::<Authorization<Bearer>>()
         .map(|Authorization(b)| b);
 
-    let Some(bearer) = bearer else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
+    let user_id: i64 = if let Some(bearer) = bearer {
+        let Ok(data) = trucoshi_auth::jwt::decode_access_jwt(&state.tokens, bearer.token()) else {
+            return StatusCode::UNAUTHORIZED.into_response();
+        };
 
-    let Ok(data) = trucoshi_auth::jwt::decode_access_jwt(&state.tokens, bearer.token()) else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
+        let Ok(user_id) = data.claims.sub.parse::<i64>() else {
+            return StatusCode::UNAUTHORIZED.into_response();
+        };
 
-    let Ok(user_id) = data.claims.sub.parse::<i64>() else {
-        return StatusCode::UNAUTHORIZED.into_response();
+        user_id
+    } else {
+        use std::sync::atomic::{AtomicI64, Ordering};
+        static GUEST_USER_ID: AtomicI64 = AtomicI64::new(-1);
+        GUEST_USER_ID.fetch_sub(1, Ordering::Relaxed)
     };
 
     let realtime = state.realtime.clone();
