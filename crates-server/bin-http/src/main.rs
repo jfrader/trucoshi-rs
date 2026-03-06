@@ -13,6 +13,8 @@ use time::{Duration, OffsetDateTime};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod game_history;
+
 #[derive(Clone)]
 struct AppState {
     store: trucoshi_store::Store,
@@ -91,6 +93,15 @@ async fn main() -> anyhow::Result<()> {
     let store = trucoshi_store::Store::connect(&database_url).await?;
     trucoshi_store::migrate::run_migrations(&store.pool).await?;
 
+    // Best-effort game history persistence.
+    //
+    // IMPORTANT: this must never interfere with gameplay; failures are logged and dropped.
+    let (history_tx, history_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(game_history::run_game_history_worker(
+        store.clone(),
+        history_rx,
+    ));
+
     let cookie = CookieConfig {
         refresh_cookie_name: "trucoshi_refresh".into(),
         refresh_cookie_path: "/v1/auth/refresh-tokens".into(),
@@ -113,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
             client_id: twitter_client_id,
             client_secret: twitter_client_secret,
         },
-        realtime: trucoshi_realtime::server::Realtime::new(),
+        realtime: trucoshi_realtime::server::Realtime::new_with_history(history_tx),
     });
 
     let app = Router::new()

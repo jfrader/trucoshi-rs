@@ -1,3 +1,4 @@
+use crate::history::{GameHistoryEvent, HistoryPlayer};
 use crate::protocol::ws::v2::{
     C2sMessage, ChatMessageData, ChatSnapshotData, ErrorPayload, GameSnapshotData, GameUpdateData,
     HelloData, LobbyMatchRemoveData, LobbyMatchUpsertData, LobbySnapshotData, MatchLeftData,
@@ -83,12 +84,27 @@ pub struct MatchState {
 #[derive(Clone)]
 pub struct Realtime {
     state: Arc<Mutex<RealtimeState>>,
+    history_tx: Option<mpsc::UnboundedSender<GameHistoryEvent>>,
 }
 
 impl Realtime {
     pub fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(RealtimeState::default())),
+            history_tx: None,
+        }
+    }
+
+    pub fn new_with_history(history_tx: mpsc::UnboundedSender<GameHistoryEvent>) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(RealtimeState::default())),
+            history_tx: Some(history_tx),
+        }
+    }
+
+    fn emit_history(&self, ev: GameHistoryEvent) {
+        if let Some(tx) = self.history_tx.as_ref() {
+            let _ = tx.send(ev);
         }
     }
 
@@ -312,6 +328,38 @@ impl Realtime {
                     s.matches.insert(match_id.clone(), m);
                 }
 
+                // Best-effort: emit persistence events (does not affect gameplay if dropped).
+                {
+                    let owner_user_id = {
+                        let s = self.state.lock().await;
+                        s.sessions
+                            .get(&session_id)
+                            .map(|sess| sess.user_id)
+                            .unwrap_or(0)
+                    };
+
+                    let match_options = serde_json::to_value(&options).unwrap_or_else(
+                        |_| serde_json::json!({ "error": "failed_to_serialize_match_options" }),
+                    );
+
+                    self.emit_history(GameHistoryEvent::MatchCreated {
+                        match_id: match_id.clone(),
+                        server_version: env!("CARGO_PKG_VERSION").to_string(),
+                        protocol_version: 2,
+                        rng_seed: Self::seed_for_hand(&match_id, 0) as i64,
+                        options: serde_json::json!({
+                            "ws_match_id": match_id.clone(),
+                            "match_options": match_options,
+                        }),
+                        owner: HistoryPlayer {
+                            seat_idx: 0,
+                            team_idx: team.as_u8(),
+                            user_id: owner_user_id,
+                            display_name: player.name.clone(),
+                        },
+                    });
+                }
+
                 // auto-join the match chat room (room id == match_id)
                 self.join_room_internal(session_id, &match_id).await;
 
@@ -342,6 +390,51 @@ impl Realtime {
                 match res {
                     Ok(()) => {
                         self.join_room_internal(session_id, &match_id).await;
+
+                        // Best-effort: emit persistence events.
+                        {
+                            let maybe = {
+                                let s = self.state.lock().await;
+                                if let Some(sess) = s.sessions.get(&session_id) {
+                                    if let Some(pkey) = sess.player_key.as_deref() {
+                                        if let Some(m) = s.matches.get(&match_id) {
+                                            if let Some(seat_idx) =
+                                                m.players.iter().position(|p| p.key == pkey)
+                                            {
+                                                if let Some(p) = m.players.get(seat_idx) {
+                                                    Some((
+                                                        sess.user_id,
+                                                        seat_idx,
+                                                        p.team.as_u8(),
+                                                        p.name.clone(),
+                                                    ))
+                                                } else {
+                                                    None
+                                                }
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            };
+
+                            if let Some((user_id, seat_idx, team_idx, display_name)) = maybe {
+                                self.emit_history(GameHistoryEvent::PlayerJoined {
+                                    match_id: match_id.clone(),
+                                    seat_idx: u8::try_from(seat_idx).unwrap_or(0),
+                                    team_idx,
+                                    user_id,
+                                    display_name,
+                                });
+                            }
+                        }
 
                         // Echo correlation id on the joiner's match snapshot.
                         self.emit_match_snapshot_to(session_id, &match_id, id).await;
@@ -579,6 +672,10 @@ impl Realtime {
                     return;
                 }
 
+                self.emit_history(GameHistoryEvent::MatchStarted {
+                    match_id: msid.clone(),
+                });
+
                 let correlated = id.clone().map(|id| (session_id, id));
                 self.emit_match_snapshot_to_match(&msid, correlated).await;
                 self.broadcast_lobby_match_upsert(&msid).await;
@@ -757,6 +854,7 @@ impl Realtime {
 
                 // Apply move under lock.
                 let mut err: Option<(String, String)> = None;
+                let mut history_finish: Option<([u8; 2], String)> = None;
                 {
                     let mut s = self.state.lock().await;
                     let Some(m) = s.matches.get_mut(&msid) else {
@@ -844,6 +942,8 @@ impl Realtime {
                                                 >= match_points
                                         {
                                             m.phase = MatchPhase::Finished;
+                                            history_finish =
+                                                Some((m.team_points, "score_reached".into()));
                                             g.public.hand_state = HandState::Finished;
                                             g.public.winner_team_idx = Some(winner_team_idx);
                                         } else {
@@ -882,6 +982,14 @@ impl Realtime {
                 if let Some((code, msg)) = err {
                     self.send_to(session_id, Self::err_out(id, code, msg)).await;
                     return;
+                }
+
+                if let Some((team_points, reason)) = history_finish.take() {
+                    self.emit_history(GameHistoryEvent::MatchFinished {
+                        match_id: msid.clone(),
+                        team_points,
+                        reason,
+                    });
                 }
 
                 // Broadcast updates outside the lock.
@@ -936,6 +1044,7 @@ impl Realtime {
                 }
 
                 let mut err: Option<(String, String)> = None;
+                let mut history_finish: Option<([u8; 2], String)> = None;
                 {
                     let mut s = self.state.lock().await;
                     let Some(m) = s.matches.get_mut(&msid) else {
@@ -1026,6 +1135,8 @@ impl Realtime {
                                         && m.team_points[winner_team_idx as usize] >= match_points
                                     {
                                         m.phase = MatchPhase::Finished;
+                                        history_finish =
+                                            Some((m.team_points, "score_reached".into()));
                                         g.public.hand_state = HandState::Finished;
                                         g.public.winner_team_idx = Some(winner_team_idx);
                                     } else {
@@ -1060,6 +1171,14 @@ impl Realtime {
                 if let Some((code, msg)) = err {
                     self.send_to(session_id, Self::err_out(id, code, msg)).await;
                     return;
+                }
+
+                if let Some((team_points, reason)) = history_finish.take() {
+                    self.emit_history(GameHistoryEvent::MatchFinished {
+                        match_id: msid.clone(),
+                        team_points,
+                        reason,
+                    });
                 }
 
                 {
@@ -1576,6 +1695,7 @@ impl Realtime {
     /// Returns `true` if the match was removed (became empty).
     async fn leave_match_internal(&self, session_id: Uuid, match_id: &str, key: &str) -> bool {
         let mut removed = false;
+        let mut history_finish: Option<[u8; 2]> = None;
         {
             let mut s = self.state.lock().await;
 
@@ -1600,6 +1720,11 @@ impl Realtime {
                 // This keeps the realtime state consistent without attempting mid-hand
                 // substitutions/rebalancing.
                 if m.phase != MatchPhase::Lobby {
+                    // Avoid double-emitting a finish event.
+                    if m.phase != MatchPhase::Finished {
+                        history_finish = Some(m.team_points);
+                    }
+
                     m.phase = MatchPhase::Finished;
                     m.game = None;
                     m.pending_game = None;
@@ -1611,6 +1736,14 @@ impl Realtime {
                     removed = true;
                 }
             }
+        }
+
+        if let Some(team_points) = history_finish.take() {
+            self.emit_history(GameHistoryEvent::MatchFinished {
+                match_id: match_id.to_string(),
+                team_points,
+                reason: "player_left".into(),
+            });
         }
 
         self.leave_room_internal(session_id, match_id).await;
@@ -2021,5 +2154,153 @@ mod e2e_smoke_tests {
             )
             .await;
         }
+    }
+
+    #[tokio::test]
+    async fn history_events_emitted_for_match_lifecycle() {
+        use crate::history::GameHistoryEvent;
+        use tokio::time::{Duration, timeout};
+
+        let (history_tx, mut history_rx) = tokio::sync::mpsc::unbounded_channel();
+        let rt = Realtime::new_with_history(history_tx);
+
+        let (s1, _rx1) = add_session(&rt, -1).await;
+        let (s2, _rx2) = add_session(&rt, -2).await;
+
+        // Create a 2-player match that finishes after a single hand.
+        rt.handle_message(
+            s1,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchCreate(MatchCreateData {
+                    name: "p1".into(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                    options: Some(MatchOptions {
+                        max_players: 2,
+                        flor: true,
+                        match_points: 1,
+                        turn_time_ms: 30_000,
+                    })
+                    .into(),
+                }),
+            },
+        )
+        .await;
+
+        let match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&s1)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("creator should be in a match")
+        };
+
+        // Join as second client.
+        rt.handle_message(
+            s2,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchJoin(MatchJoinData {
+                    match_id: match_id.clone(),
+                    name: "p2".into(),
+                    team: Some(TeamIdx::TEAM_1).into(),
+                }),
+            },
+        )
+        .await;
+
+        // Ready both clients.
+        for (sid, ready) in [(s1, true), (s2, true)] {
+            rt.handle_message(
+                sid,
+                WsInMessage {
+                    v: Default::default(),
+                    id: Default::default(),
+                    msg: C2sMessage::MatchReady(MatchReadyData {
+                        match_id: match_id.clone(),
+                        ready,
+                    }),
+                },
+            )
+            .await;
+        }
+
+        // Start (owner only).
+        rt.handle_message(
+            s1,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchStart(MatchRefData {
+                    match_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+
+        // Play out until finished.
+        loop {
+            let (phase, turn_session_id, turn_hand_len) = {
+                let s = rt.state.lock().await;
+                let m = s.matches.get(&match_id).expect("match exists");
+                let phase = m.phase;
+
+                if phase == MatchPhase::Finished {
+                    (phase, s1, 0)
+                } else {
+                    let g = m.game.as_ref().expect("game started");
+                    let turn_seat_idx = g.public.turn_seat_idx as usize;
+
+                    let key = m.players[turn_seat_idx].key.clone();
+                    let turn_session_id = *s
+                        .sessions
+                        .iter()
+                        .find_map(|(sid, sess)| {
+                            (sess.player_key.as_deref() == Some(key.as_str())).then_some(sid)
+                        })
+                        .expect("turn session");
+
+                    let hand_len = g.hands().get(turn_seat_idx).map(|h| h.len()).unwrap_or(0);
+
+                    (phase, turn_session_id, hand_len)
+                }
+            };
+
+            if phase == MatchPhase::Finished {
+                break;
+            }
+
+            assert!(turn_hand_len > 0, "turn player should have cards");
+
+            rt.handle_message(
+                turn_session_id,
+                WsInMessage {
+                    v: Default::default(),
+                    id: Default::default(),
+                    msg: C2sMessage::GamePlayCard(GamePlayCardData {
+                        match_id: match_id.clone(),
+                        card_idx: 0,
+                    }),
+                },
+            )
+            .await;
+        }
+
+        // Collect the first 4 lifecycle events.
+        let mut got = Vec::new();
+        for _ in 0..4 {
+            let ev = timeout(Duration::from_millis(200), history_rx.recv())
+                .await
+                .expect("history event timeout")
+                .expect("history channel closed");
+            got.push(ev);
+        }
+
+        assert!(matches!(got[0], GameHistoryEvent::MatchCreated { .. }));
+        assert!(matches!(got[1], GameHistoryEvent::PlayerJoined { .. }));
+        assert!(matches!(got[2], GameHistoryEvent::MatchStarted { .. }));
+        assert!(matches!(got[3], GameHistoryEvent::MatchFinished { .. }));
     }
 }
