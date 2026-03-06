@@ -15,6 +15,7 @@ use rand::{SeedableRng, seq::SliceRandom};
 mod types;
 
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 
 /// Card identifier.
 ///
@@ -81,6 +82,19 @@ pub enum CommandOutcome {
     ///
     /// Points correspond to the value earned due to the command resolution.
     HandEnded { winner_team_idx: u8, points: u8 },
+    /// The command awarded match points but did not end the hand (e.g. Envido).
+    PointsAwarded {
+        winner_team_idx: u8,
+        points: u8,
+        reason: PointsAwardReason,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointsAwardReason {
+    EnvidoAccepted,
+    EnvidoFaltaAccepted,
+    EnvidoDeclined,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +116,13 @@ struct PendingCall {
     ///
     /// For non-Truco calls, this is 0.
     truco_target_value: u8,
+
+    /// For Envido-family calls, the points awarded if accepted.
+    envido_points_on_accept: u8,
+    /// For Envido-family calls, the points awarded if declined.
+    envido_decline_points: u8,
+    /// Whether the pending call corresponds to Falta Envido.
+    envido_is_falta: bool,
 }
 
 /// Minimal, migration-friendly in-memory game state.
@@ -292,6 +313,8 @@ impl GameState {
         cmd: GameCommand,
         from_player_idx: usize,
         teams_by_player_idx: &[u8],
+        match_points: u8,
+        current_team_points: [u8; 2],
         turn_time_ms: i64,
         now_ms: i64,
     ) -> CommandOutcome {
@@ -329,6 +352,19 @@ impl GameState {
                             caller_idx,
                             resume_turn_idx: prev_turn,
                             truco_target_value,
+                            envido_points_on_accept: match cmd {
+                                GameCommand::Envido => 2,
+                                GameCommand::RealEnvido => 3,
+                                GameCommand::FaltaEnvido => 0,
+                                _ => 0,
+                            },
+                            envido_decline_points: match cmd {
+                                GameCommand::Envido
+                                | GameCommand::RealEnvido
+                                | GameCommand::FaltaEnvido => 1,
+                                _ => 0,
+                            },
+                            envido_is_falta: matches!(cmd, GameCommand::FaltaEnvido),
                         });
 
                         let responder = next_opponent_idx(caller_idx, teams_by_player_idx);
@@ -341,6 +377,74 @@ impl GameState {
         }
 
         match (prev_state, cmd) {
+            (WaitingEnvidoAnswer, GameCommand::NoQuiero) => {
+                if let Some(p) = self.pending_call.take() {
+                    self.turn_idx = p.resume_turn_idx;
+                    self.public.turn_seat_idx = p.resume_turn_idx;
+                    self.turn_expires_at_ms = now_ms.saturating_add(turn_time_ms.max(0));
+                    self.public.hand_state = WaitingPlay;
+
+                    if p.kind == PendingCallKind::Envido {
+                        let winner = teams_by_player_idx
+                            .get(p.caller_idx as usize)
+                            .copied()
+                            .unwrap_or(0);
+                        let winner = if winner < 2 { winner } else { 0 };
+                        let points = p.envido_decline_points.max(1);
+
+                        return CommandOutcome::PointsAwarded {
+                            winner_team_idx: winner,
+                            points,
+                            reason: PointsAwardReason::EnvidoDeclined,
+                        };
+                    }
+                }
+
+                CommandOutcome::None
+            }
+
+            (WaitingEnvidoAnswer, GameCommand::Quiero) => {
+                if let Some(p) = self.pending_call.take() {
+                    self.turn_idx = p.resume_turn_idx;
+                    self.public.turn_seat_idx = p.resume_turn_idx;
+                    self.turn_expires_at_ms = now_ms.saturating_add(turn_time_ms.max(0));
+                    self.public.hand_state = WaitingPlay;
+
+                    if p.kind == PendingCallKind::Envido {
+                        let winner_team_idx = self
+                            .resolve_envido_winner(teams_by_player_idx)
+                            .unwrap_or_else(|| {
+                                let fallback = teams_by_player_idx
+                                    .get(p.caller_idx as usize)
+                                    .copied()
+                                    .unwrap_or(0);
+                                if fallback < 2 { fallback } else { 0 }
+                            });
+
+                        let mut points = p.envido_points_on_accept.max(1);
+                        let mut reason = PointsAwardReason::EnvidoAccepted;
+
+                        if p.envido_is_falta {
+                            let target = match_points.max(1);
+                            let current = current_team_points
+                                .get(winner_team_idx as usize)
+                                .copied()
+                                .unwrap_or(0);
+                            points = target.saturating_sub(current).max(1);
+                            reason = PointsAwardReason::EnvidoFaltaAccepted;
+                        }
+
+                        return CommandOutcome::PointsAwarded {
+                            winner_team_idx,
+                            points,
+                            reason,
+                        };
+                    }
+                }
+
+                CommandOutcome::None
+            }
+
             // Declining truco ends the hand; award the hand to the *requesting* team.
             (WaitingForTrucoAnswer, GameCommand::NoQuiero) => {
                 let pending = self.pending_call.take();
@@ -388,10 +492,7 @@ impl GameState {
 
             // Generic answers just resume play (and restore the pre-call turn seat).
             (
-                WaitingForTrucoAnswer
-                | WaitingEnvidoAnswer
-                | WaitingEnvidoPointsAnswer
-                | WaitingFlorAnswer,
+                WaitingForTrucoAnswer | WaitingEnvidoPointsAnswer | WaitingFlorAnswer,
                 GameCommand::Quiero | GameCommand::NoQuiero,
             ) => {
                 if let Some(p) = self.pending_call.take() {
@@ -416,6 +517,93 @@ impl GameState {
             // decided.
             _ => CommandOutcome::None,
         }
+    }
+
+    fn resolve_envido_winner(&self, teams_by_player_idx: &[u8]) -> Option<u8> {
+        self.envido_winner_player(teams_by_player_idx)
+            .map(|(team_idx, _seat_idx)| team_idx)
+    }
+
+    fn envido_winner_player(&self, teams_by_player_idx: &[u8]) -> Option<(u8, u8)> {
+        let best_team0 = self.best_envido_for_team(0, teams_by_player_idx);
+        let best_team1 = self.best_envido_for_team(1, teams_by_player_idx);
+
+        match (best_team0, best_team1) {
+            (Some((points0, seat0)), Some((points1, seat1))) => match points0.cmp(&points1) {
+                Ordering::Greater => Some((0, seat0)),
+                Ordering::Less => Some((1, seat1)),
+                Ordering::Equal => {
+                    let pref0 = self.seat_precedence_from_forehand(seat0);
+                    let pref1 = self.seat_precedence_from_forehand(seat1);
+                    if pref0 <= pref1 {
+                        Some((0, seat0))
+                    } else {
+                        Some((1, seat1))
+                    }
+                }
+            },
+            (Some((_, seat0)), None) => Some((0, seat0)),
+            (None, Some((_, seat1))) => Some((1, seat1)),
+            _ => None,
+        }
+    }
+
+    fn best_envido_for_team(&self, team_idx: u8, teams_by_player_idx: &[u8]) -> Option<(i32, u8)> {
+        let mut best: Option<(i32, u8)> = None;
+
+        for (idx, team) in teams_by_player_idx.iter().enumerate() {
+            if *team != team_idx {
+                continue;
+            }
+
+            let points = self.envido_points_for_player(idx);
+            let seat = idx as u8;
+
+            best = match best {
+                None => Some((points, seat)),
+                Some((best_points, best_seat)) => {
+                    if points > best_points {
+                        Some((points, seat))
+                    } else if points == best_points
+                        && self.seat_precedence_from_forehand(seat)
+                            < self.seat_precedence_from_forehand(best_seat)
+                    {
+                        Some((points, seat))
+                    } else {
+                        Some((best_points, best_seat))
+                    }
+                }
+            };
+        }
+
+        best
+    }
+
+    fn seat_precedence_from_forehand(&self, seat_idx: u8) -> u8 {
+        let players_len = self.hands.len();
+        if players_len == 0 {
+            return 0;
+        }
+
+        let len = players_len as i32;
+        let forehand = self.public.forehand_seat_idx as i32;
+        let seat = seat_idx as i32;
+        let mut offset = seat - forehand;
+        if offset < 0 {
+            offset += len;
+        }
+        offset as u8
+    }
+
+    fn envido_points_for_player(&self, player_idx: usize) -> i32 {
+        let mut cards: Vec<String> = Vec::new();
+        if let Some(hand) = self.hands.get(player_idx) {
+            cards.extend(hand.iter().cloned());
+        }
+        if let Some(used) = self.used_hands.get(player_idx) {
+            cards.extend(used.iter().cloned());
+        }
+        calculate_envido_points(&cards)
     }
 
     /// Apply a card play for the current turn.
@@ -814,14 +1002,14 @@ mod tests {
         let teams = vec![0u8, 1u8];
 
         // Someone says TRUCO, we enter the answer state.
-        g.apply_command(GameCommand::Truco, 0, &teams, 10_000, now);
+        g.apply_command(GameCommand::Truco, 0, &teams, 9, [0, 0], 10_000, now);
         assert_eq!(g.public.hand_state, HandState::WaitingForTrucoAnswer);
 
         // Answer turn should move to the opponent.
         assert_eq!(g.public.turn_seat_idx, 1);
 
         // Opponent declines.
-        let outcome = g.apply_command(GameCommand::NoQuiero, 1, &teams, 10_000, now);
+        let outcome = g.apply_command(GameCommand::NoQuiero, 1, &teams, 9, [0, 0], 10_000, now);
         assert_eq!(
             outcome,
             CommandOutcome::HandEnded {
@@ -842,12 +1030,12 @@ mod tests {
         assert_eq!(g.public.turn_seat_idx, 0);
 
         // Caller initiates.
-        g.apply_command(GameCommand::Truco, 0, &teams, 10_000, now);
+        g.apply_command(GameCommand::Truco, 0, &teams, 9, [0, 0], 10_000, now);
         assert_eq!(g.public.hand_state, HandState::WaitingForTrucoAnswer);
         assert_eq!(g.public.turn_seat_idx, 1);
 
         // Opponent accepts.
-        g.apply_command(GameCommand::Quiero, 1, &teams, 10_000, now);
+        g.apply_command(GameCommand::Quiero, 1, &teams, 9, [0, 0], 10_000, now);
         assert_eq!(g.public.hand_state, HandState::WaitingPlay);
         assert_eq!(g.public.turn_seat_idx, 0);
     }
@@ -886,5 +1074,95 @@ mod tests {
             c,
             GameCommand::Flor | GameCommand::ContraFlor | GameCommand::ContraFlorAlResto
         )));
+    }
+
+    #[test]
+    fn envido_decline_awards_points_to_caller() {
+        let now = 1_000i64;
+        let mut g = GameState::new_with_forehand(2, 42, 10_000, now, 0);
+        let teams = vec![0u8, 1u8];
+
+        g.apply_command(GameCommand::Envido, 0, &teams, 9, [0, 0], 10_000, now);
+        let outcome = g.apply_command(GameCommand::NoQuiero, 1, &teams, 9, [0, 0], 10_000, now);
+
+        assert_eq!(
+            outcome,
+            CommandOutcome::PointsAwarded {
+                winner_team_idx: 0,
+                points: 1,
+                reason: PointsAwardReason::EnvidoDeclined,
+            }
+        );
+        assert_eq!(g.public.hand_state, HandState::WaitingPlay);
+    }
+
+    #[test]
+    fn envido_accept_awards_points_to_winning_team() {
+        let now = 1_000i64;
+        let mut g = GameState::new_with_forehand(2, 42, 10_000, now, 0);
+        let teams = vec![0u8, 1u8];
+
+        if let Some(hand) = g.hands.get_mut(0) {
+            *hand = vec!["1e".to_string(), "2o".to_string(), "3c".to_string()];
+        }
+        if let Some(hand) = g.hands.get_mut(1) {
+            *hand = vec!["7b".to_string(), "6b".to_string(), "5b".to_string()];
+        }
+
+        g.apply_command(GameCommand::Envido, 0, &teams, 9, [0, 0], 10_000, now);
+        let outcome = g.apply_command(GameCommand::Quiero, 1, &teams, 9, [0, 0], 10_000, now);
+
+        assert_eq!(
+            outcome,
+            CommandOutcome::PointsAwarded {
+                winner_team_idx: 1,
+                points: 2,
+                reason: PointsAwardReason::EnvidoAccepted,
+            }
+        );
+    }
+
+    #[test]
+    fn falta_envido_awards_match_difference_on_accept() {
+        let now = 1_000i64;
+        let mut g = GameState::new_with_forehand(2, 42, 10_000, now, 0);
+        let teams = vec![0u8, 1u8];
+
+        if let Some(hand) = g.hands.get_mut(0) {
+            *hand = vec!["7e".to_string(), "6e".to_string(), "5e".to_string()];
+        }
+        if let Some(hand) = g.hands.get_mut(1) {
+            *hand = vec!["1b".to_string(), "2c".to_string(), "3o".to_string()];
+        }
+
+        let current_points = [5u8, 3u8];
+
+        g.apply_command(
+            GameCommand::FaltaEnvido,
+            0,
+            &teams,
+            9,
+            current_points,
+            10_000,
+            now,
+        );
+        let outcome = g.apply_command(
+            GameCommand::Quiero,
+            1,
+            &teams,
+            9,
+            current_points,
+            10_000,
+            now,
+        );
+
+        assert_eq!(
+            outcome,
+            CommandOutcome::PointsAwarded {
+                winner_team_idx: 0,
+                points: 4,
+                reason: PointsAwardReason::EnvidoFaltaAccepted,
+            }
+        );
     }
 }

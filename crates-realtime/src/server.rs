@@ -17,7 +17,7 @@ use std::{
 };
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, warn};
-use trucoshi_game::{CommandOutcome, PlayOutcome};
+use trucoshi_game::{CommandOutcome, PlayOutcome, PointsAwardReason};
 use uuid::Uuid;
 
 #[derive(Default)]
@@ -1471,6 +1471,8 @@ impl Realtime {
                                     command,
                                     from_player_idx,
                                     &teams_by_player_idx,
+                                    m.options.match_points,
+                                    m.team_points,
                                     m.options.turn_time_ms,
                                     now_ms,
                                 );
@@ -1490,6 +1492,55 @@ impl Realtime {
                                                 "server_time_ms": now_ms,
                                             }),
                                         });
+                                    }
+
+                                    CommandOutcome::PointsAwarded {
+                                        winner_team_idx,
+                                        points,
+                                        reason,
+                                    } => {
+                                        let award_reason = match reason {
+                                            PointsAwardReason::EnvidoAccepted => "envido_accepted",
+                                            PointsAwardReason::EnvidoFaltaAccepted => {
+                                                "envido_falta_accepted"
+                                            }
+                                            PointsAwardReason::EnvidoDeclined => "envido_declined",
+                                        };
+
+                                        history_action = Some(GameHistoryEvent::GameAction {
+                                            match_id: msid.clone(),
+                                            actor_seat_idx,
+                                            actor_team_idx,
+                                            actor_user_id,
+                                            ty: "game.say".into(),
+                                            data: serde_json::json!({
+                                                "hand_no": hand_no_at_action,
+                                                "command": command_value,
+                                                "outcome": "points_awarded",
+                                                "winner_team_idx": winner_team_idx,
+                                                "points": points,
+                                                "award_reason": award_reason,
+                                                "server_time_ms": now_ms,
+                                            }),
+                                        });
+
+                                        if winner_team_idx < 2 {
+                                            m.team_points[winner_team_idx as usize] = m.team_points
+                                                [winner_team_idx as usize]
+                                                .saturating_add(points);
+                                        }
+
+                                        let match_points = m.options.match_points.max(1);
+                                        if winner_team_idx < 2
+                                            && m.team_points[winner_team_idx as usize]
+                                                >= match_points
+                                        {
+                                            m.phase = MatchPhase::Finished;
+                                            m.game = None;
+                                            m.pending_game = None;
+                                            history_finish =
+                                                Some((m.team_points, "score_reached".into()));
+                                        }
                                     }
 
                                     CommandOutcome::HandEnded {
