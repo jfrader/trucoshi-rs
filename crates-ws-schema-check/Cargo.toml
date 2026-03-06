@@ -1,0 +1,11 @@
+[package]
+name = "trucoshi-ws-schema-check"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde_json = { workspace = true }
+schemars = "0.8"
+
+# Pull in the realtime protocol types + JSON schema helpers.
+trucoshi-realtime = { path = "../crates-realtime", features = ["json-schema"] }

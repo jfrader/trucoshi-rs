@@ -2378,6 +2378,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "trucoshi-ws-schema-check"
+version = "0.1.0"
+dependencies = [
+ "schemars",
+ "serde_json",
+ "trucoshi-realtime",
+]
+
+[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

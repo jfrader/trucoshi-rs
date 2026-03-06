@@ -5,6 +5,7 @@ members = [
   "crates-store",
   "crates-game",
   "crates-realtime",
+  "crates-ws-schema-check",
   "crates-server",
   "crates-server/bin-http",
 ]
