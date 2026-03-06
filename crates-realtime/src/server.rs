@@ -65,7 +65,14 @@ pub struct MatchState {
     /// Team points (match score) for teams 0 and 1.
     pub team_points: [u8; 2],
 
+    /// Current hand/game state.
     pub game: Option<trucoshi_game::GameState>,
+
+    /// When a hand ends but the match is still ongoing, we stage the next hand here.
+    ///
+    /// This allows us to broadcast the *finished* hand state first (so clients can animate/show
+    /// results) and then start the next hand with a second update.
+    pub pending_game: Option<trucoshi_game::GameState>,
 }
 
 #[derive(Clone)]
@@ -287,6 +294,7 @@ impl Realtime {
                     participants: HashSet::from([session_id]),
                     team_points: [0, 0],
                     game: None,
+                    pending_game: None,
                 };
 
                 {
@@ -780,8 +788,13 @@ impl Realtime {
                                             g.public.hand_state = HandState::Finished;
                                             g.public.winner_team_idx = Some(winner_team_idx);
                                         } else {
-                                            // Start a new hand immediately for now.
-                                            *g = trucoshi_game::GameState::new(
+                                            // Match continues. First, expose the finished hand state to
+                                            // clients, then stage the next hand so we can broadcast it as
+                                            // a second update.
+                                            g.public.hand_state = HandState::Finished;
+                                            g.public.winner_team_idx = Some(winner_team_idx);
+
+                                            m.pending_game = Some(trucoshi_game::GameState::new(
                                                 m.players.len(),
                                                 Self::seed_from_str(&format!(
                                                     "{}:{}",
@@ -790,7 +803,7 @@ impl Realtime {
                                                 )),
                                                 m.options.turn_time_ms,
                                                 Self::now_ms(),
-                                            );
+                                            ));
                                         }
                                     }
                                     _ => {}
@@ -812,8 +825,11 @@ impl Realtime {
                 let correlated = id.clone().map(|id| (session_id, id));
                 self.emit_match_update_to_match(&msid, correlated.clone())
                     .await;
-                self.broadcast_game_update_to_match(&msid, correlated).await;
+                self.broadcast_game_update_to_match(&msid, correlated.clone())
+                    .await;
                 self.broadcast_lobby_match_upsert(&msid).await;
+
+                self.maybe_start_pending_hand(&msid, correlated).await;
             }
 
             C2sMessage::GameSay(d) => {
@@ -907,6 +923,22 @@ impl Realtime {
                                     m.phase = MatchPhase::Finished;
                                     g.public.hand_state = HandState::Finished;
                                     g.public.winner_team_idx = Some(winner_team_idx);
+                                } else {
+                                    // Match continues: broadcast the finished hand first, then
+                                    // start the next hand with a follow-up update.
+                                    g.public.hand_state = HandState::Finished;
+                                    g.public.winner_team_idx = Some(winner_team_idx);
+
+                                    m.pending_game = Some(trucoshi_game::GameState::new(
+                                        m.players.len(),
+                                        Self::seed_from_str(&format!(
+                                            "{}:{}",
+                                            msid,
+                                            Uuid::new_v4()
+                                        )),
+                                        m.options.turn_time_ms,
+                                        Self::now_ms(),
+                                    ));
                                 }
                             }
                         }
@@ -924,8 +956,11 @@ impl Realtime {
                     let correlated = id.clone().map(|id| (session_id, id));
                     self.emit_match_update_to_match(&msid, correlated.clone())
                         .await;
-                    self.broadcast_game_update_to_match(&msid, correlated).await;
+                    self.broadcast_game_update_to_match(&msid, correlated.clone())
+                        .await;
                     self.broadcast_lobby_match_upsert(&msid).await;
+
+                    self.maybe_start_pending_hand(&msid, correlated).await;
                 }
             }
 
@@ -1630,5 +1665,34 @@ impl Realtime {
         };
 
         self.broadcast_to(&participants, &msg).await;
+    }
+
+    async fn maybe_start_pending_hand(&self, match_id: &str, correlated: Option<(Uuid, String)>) {
+        let should_broadcast = {
+            let mut s = self.state.lock().await;
+            let Some(m) = s.matches.get_mut(match_id) else {
+                return;
+            };
+
+            if m.phase == MatchPhase::Finished {
+                m.pending_game = None;
+                return;
+            }
+
+            let Some(next) = m.pending_game.take() else {
+                return;
+            };
+
+            m.game = Some(next);
+            true
+        };
+
+        if should_broadcast {
+            self.emit_match_update_to_match(match_id, correlated.clone())
+                .await;
+            self.broadcast_game_update_to_match(match_id, correlated)
+                .await;
+            self.broadcast_lobby_match_upsert(match_id).await;
+        }
     }
 }
