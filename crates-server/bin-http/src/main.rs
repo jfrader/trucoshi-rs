@@ -150,21 +150,29 @@ async fn ws_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    // Access token required for WS.
+    // Authenticated WS is preferred, but we allow guest connections to make
+    // "open the app and see it" workflows easy (especially on web where WS
+    // headers aren't supported).
+
     let bearer = headers
         .typed_get::<Authorization<Bearer>>()
         .map(|Authorization(b)| b);
 
-    let Some(bearer) = bearer else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
+    let user_id = if let Some(bearer) = bearer {
+        let Ok(data) = trucoshi_auth::jwt::decode_access_jwt(&state.tokens, bearer.token()) else {
+            return StatusCode::UNAUTHORIZED.into_response();
+        };
 
-    let Ok(data) = trucoshi_auth::jwt::decode_access_jwt(&state.tokens, bearer.token()) else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
+        let Ok(user_id) = data.claims.sub.parse::<i64>() else {
+            return StatusCode::UNAUTHORIZED.into_response();
+        };
 
-    let Ok(user_id) = data.claims.sub.parse::<i64>() else {
-        return StatusCode::UNAUTHORIZED.into_response();
+        user_id
+    } else {
+        // Guest ids are ephemeral and negative to avoid colliding with DB ids.
+        // (This does not grant access to any HTTP endpoints that require auth.)
+        let r: u64 = rand::random();
+        -(r as i64).abs()
     };
 
     let realtime = state.realtime.clone();
@@ -193,13 +201,13 @@ struct UserDto {
     id: i64,
     email: Option<String>,
     name: String,
-    avatarUrl: Option<String>,
-    twitter: Option<String>,
+    avatar_url: Option<String>,
+    twitter_handle: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct AuthResponse {
-    accessToken: String,
+    access_token: String,
     user: UserDto,
 }
 
@@ -320,8 +328,8 @@ async fn me(
         id: rec.id,
         email: rec.email,
         name: rec.name,
-        avatarUrl: rec.avatar_url,
-        twitter: rec.twitter_handle,
+        avatar_url: rec.avatar_url,
+        twitter_handle: rec.twitter_handle,
     }))
 }
 
@@ -435,13 +443,13 @@ async fn issue_tokens_and_cookie(
     .map_err(ApiError::internal)?;
 
     let body = AuthResponse {
-        accessToken: access,
+        access_token: access,
         user: UserDto {
             id: rec.id,
             email: rec.email,
             name: rec.name,
-            avatarUrl: rec.avatar_url,
-            twitter: rec.twitter_handle,
+            avatar_url: rec.avatar_url,
+            twitter_handle: rec.twitter_handle,
         },
     };
 
