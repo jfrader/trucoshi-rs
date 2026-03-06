@@ -70,6 +70,7 @@ All WebSocket frames are JSON objects.
 
 - `match.create` (C2S) — creates a match and seats the creator (requires `data.name`; optional `data.team` + `data.options`)
 - `match.join` (C2S)
+- `match.watch` (C2S) — join a match as a spectator (hands hidden; no seat)
 - `match.leave` (C2S) → `match.left` (S2C) — explicit confirmation
 - `match.ready` (C2S)
 - `match.start` (C2S)

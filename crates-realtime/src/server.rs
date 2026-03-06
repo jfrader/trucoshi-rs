@@ -508,9 +508,10 @@ impl Realtime {
                 self.join_room_internal(session_id, &match_id).await;
 
                 // Send immediate snapshots to spectator (hands hidden, me omitted).
-                self.emit_match_snapshot_to(session_id, &match_id, id.clone())
-                    .await;
-                self.emit_game_snapshot_to(session_id, &match_id, id).await;
+                //
+                // Note: `emit_match_snapshot_to` already includes a game snapshot when gameplay is
+                // running, so we intentionally don't emit a separate `game.snapshot` here.
+                self.emit_match_snapshot_to(session_id, &match_id, id).await;
             }
 
             C2sMessage::MatchLeave(d) => {
@@ -605,12 +606,24 @@ impl Realtime {
                     )
                 };
 
-                let (active_msid, pkey) = match (active_msid, pkey) {
-                    (Some(active_msid), Some(pkey)) => (active_msid, pkey),
-                    _ => {
+                let active_msid = match active_msid {
+                    Some(active_msid) => active_msid,
+                    None => {
                         self.send_to(
                             session_id,
                             Self::err_out(id, "NOT_IN_MATCH", "not in a match"),
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                let pkey = match pkey {
+                    Some(pkey) => pkey,
+                    None => {
+                        self.send_to(
+                            session_id,
+                            Self::err_out(id, "NOT_A_PLAYER", "not a player (spectator)"),
                         )
                         .await;
                         return;
@@ -687,12 +700,24 @@ impl Realtime {
                     (sess.active_match_id.clone(), sess.player_key.clone())
                 };
 
-                let (active_msid, pkey) = match (active_msid, pkey) {
-                    (Some(active_msid), Some(pkey)) => (active_msid, pkey),
-                    _ => {
+                let active_msid = match active_msid {
+                    Some(active_msid) => active_msid,
+                    None => {
                         self.send_to(
                             session_id,
                             Self::err_out(id, "NOT_IN_MATCH", "not in a match"),
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                let pkey = match pkey {
+                    Some(pkey) => pkey,
+                    None => {
+                        self.send_to(
+                            session_id,
+                            Self::err_out(id, "NOT_A_PLAYER", "not a player (spectator)"),
                         )
                         .await;
                         return;
@@ -802,12 +827,24 @@ impl Realtime {
                     )
                 };
 
-                let (active_msid, pkey) = match (active_msid, pkey) {
-                    (Some(active_msid), Some(pkey)) => (active_msid, pkey),
-                    _ => {
+                let active_msid = match active_msid {
+                    Some(active_msid) => active_msid,
+                    None => {
                         self.send_to(
                             session_id,
                             Self::err_out(id, "NOT_IN_MATCH", "not in a match"),
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                let pkey = match pkey {
+                    Some(pkey) => pkey,
+                    None => {
+                        self.send_to(
+                            session_id,
+                            Self::err_out(id, "NOT_A_PLAYER", "not a player (spectator)"),
                         )
                         .await;
                         return;
@@ -894,12 +931,24 @@ impl Realtime {
                     )
                 };
 
-                let (active_msid, pkey) = match (active_msid, pkey) {
-                    (Some(active_msid), Some(pkey)) => (active_msid, pkey),
-                    _ => {
+                let active_msid = match active_msid {
+                    Some(active_msid) => active_msid,
+                    None => {
                         self.send_to(
                             session_id,
                             Self::err_out(id, "NOT_IN_MATCH", "not in a match"),
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                let pkey = match pkey {
+                    Some(pkey) => pkey,
+                    None => {
+                        self.send_to(
+                            session_id,
+                            Self::err_out(id, "NOT_A_PLAYER", "not a player (spectator)"),
                         )
                         .await;
                         return;
@@ -987,12 +1036,24 @@ impl Realtime {
                     )
                 };
 
-                let (active_msid, pkey) = match (active_msid, pkey) {
-                    (Some(active_msid), Some(pkey)) => (active_msid, pkey),
-                    _ => {
+                let active_msid = match active_msid {
+                    Some(active_msid) => active_msid,
+                    None => {
                         self.send_to(
                             session_id,
                             Self::err_out(id, "NOT_IN_MATCH", "not in a match"),
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                let pkey = match pkey {
+                    Some(pkey) => pkey,
+                    None => {
+                        self.send_to(
+                            session_id,
+                            Self::err_out(id, "NOT_A_PLAYER", "not a player (spectator)"),
                         )
                         .await;
                         return;
@@ -1238,12 +1299,24 @@ impl Realtime {
                     )
                 };
 
-                let (active_msid, pkey) = match (active_msid, pkey) {
-                    (Some(active_msid), Some(pkey)) => (active_msid, pkey),
-                    _ => {
+                let active_msid = match active_msid {
+                    Some(active_msid) => active_msid,
+                    None => {
                         self.send_to(
                             session_id,
                             Self::err_out(id, "NOT_IN_MATCH", "not in a match"),
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                let pkey = match pkey {
+                    Some(pkey) => pkey,
+                    None => {
+                        self.send_to(
+                            session_id,
+                            Self::err_out(id, "NOT_A_PLAYER", "not a player (spectator)"),
                         )
                         .await;
                         return;
@@ -2313,6 +2386,7 @@ impl Realtime {
 #[cfg(test)]
 mod e2e_smoke_tests {
     use super::*;
+    use crate::protocol::ws::v2::messages::MatchWatchData;
     use crate::protocol::ws::v2::{
         GamePlayCardData, MatchCreateData, MatchJoinData, MatchReadyData, MatchRefData, WsInMessage,
     };
@@ -2488,6 +2562,161 @@ mod e2e_smoke_tests {
                 },
             )
             .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn e2e_spectator_watch_omits_me_and_rejects_seat_only_actions() {
+        use tokio::time::{Duration, timeout};
+
+        let rt = Realtime::new();
+
+        let (s1, _rx1) = add_session(&rt, -1).await;
+        let (s2, _rx2) = add_session(&rt, -2).await;
+        let (spec, mut rx_spec) = add_session(&rt, -3).await;
+
+        // Create a 2-player match.
+        rt.handle_message(
+            s1,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchCreate(MatchCreateData {
+                    name: "p1".into(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                    options: Some(MatchOptions {
+                        max_players: 2,
+                        flor: true,
+                        match_points: 1,
+                        turn_time_ms: 30_000,
+                    })
+                    .into(),
+                }),
+            },
+        )
+        .await;
+
+        let match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&s1)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("creator should be in a match")
+        };
+
+        // Join as second client.
+        rt.handle_message(
+            s2,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchJoin(MatchJoinData {
+                    match_id: match_id.clone(),
+                    name: "p2".into(),
+                    team: Some(TeamIdx::TEAM_1).into(),
+                }),
+            },
+        )
+        .await;
+
+        // Ready both clients and start.
+        for (sid, ready) in [(s1, true), (s2, true)] {
+            rt.handle_message(
+                sid,
+                WsInMessage {
+                    v: Default::default(),
+                    id: Default::default(),
+                    msg: C2sMessage::MatchReady(MatchReadyData {
+                        match_id: match_id.clone(),
+                        ready,
+                    }),
+                },
+            )
+            .await;
+        }
+
+        rt.handle_message(
+            s1,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchStart(MatchRefData {
+                    match_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+
+        // The spectator session existed during match setup and may have received lobby broadcasts.
+        // Drain them so the next assertions are about the watch flow.
+        while rx_spec.try_recv().is_ok() {}
+
+        // Spectator watches an in-progress match.
+        rt.handle_message(
+            spec,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchWatch(MatchWatchData {
+                    match_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+
+        // Expect a match snapshot (with `me` omitted) and a game snapshot.
+        let mut saw_match_snapshot = false;
+        let mut saw_game_snapshot = false;
+
+        for _ in 0..20 {
+            let out = timeout(Duration::from_millis(500), rx_spec.recv())
+                .await
+                .expect("expected spectator outbound message")
+                .expect("rx open");
+
+            match out.msg {
+                S2cMessage::MatchSnapshot(MatchSnapshotData { me, .. }) => {
+                    assert!(me.0.is_none(), "spectator match.snapshot must omit me");
+                    saw_match_snapshot = true;
+                }
+                S2cMessage::GameSnapshot(_) => {
+                    saw_game_snapshot = true;
+                }
+                _ => {}
+            }
+
+            if saw_match_snapshot && saw_game_snapshot {
+                break;
+            }
+        }
+
+        assert!(saw_match_snapshot, "expected match.snapshot for spectator");
+        assert!(saw_game_snapshot, "expected game.snapshot for spectator");
+
+        // Spectators should not be able to perform seat-only actions (e.g. play a card).
+        rt.handle_message(
+            spec,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::GamePlayCard(GamePlayCardData {
+                    match_id: match_id.clone(),
+                    card_idx: 0,
+                }),
+            },
+        )
+        .await;
+
+        let out = timeout(Duration::from_millis(250), rx_spec.recv())
+            .await
+            .expect("expected spectator error")
+            .expect("rx open");
+
+        match out.msg {
+            S2cMessage::Error(ErrorPayload { code, .. }) => {
+                assert_eq!(code, "NOT_A_PLAYER");
+            }
+            other => panic!("expected error payload; got {other:?}"),
         }
     }
 
