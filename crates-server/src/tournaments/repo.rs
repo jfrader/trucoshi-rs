@@ -241,6 +241,91 @@ impl TournamentsRepo {
             .collect())
     }
 
+    /// Add an entry to an OPEN tournament, enforcing capacity.
+    ///
+    /// Uses a transaction + `FOR UPDATE` lock to avoid overfilling on concurrent joins.
+    pub async fn add_entry_checked_open(
+        &self,
+        tournament_id: i64,
+        user_id: i64,
+        display_name: &str,
+    ) -> anyhow::Result<TournamentEntry> {
+        let mut tx = self.pool.begin().await?;
+
+        #[derive(sqlx::FromRow)]
+        struct TournamentRow {
+            status: String,
+            max_players: i32,
+        }
+
+        let t: Option<TournamentRow> = sqlx::query_as(
+            r#"
+            SELECT status, max_players
+            FROM tournaments
+            WHERE id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(tournament_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let Some(t) = t else {
+            anyhow::bail!("TOURNAMENT_NOT_FOUND");
+        };
+
+        if t.status != "OPEN" {
+            anyhow::bail!("TOURNAMENT_NOT_OPEN");
+        }
+
+        let (count,): (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(1)
+            FROM tournament_entries
+            WHERE tournament_id = $1
+            "#,
+        )
+        .bind(tournament_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        if count >= (t.max_players as i64) {
+            anyhow::bail!("TOURNAMENT_FULL");
+        }
+
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            id: i64,
+            tournament_id: i64,
+            user_id: Option<i64>,
+            display_name: String,
+            created_at: OffsetDateTime,
+        }
+
+        let rec: Row = sqlx::query_as(
+            r#"
+            INSERT INTO tournament_entries (tournament_id, user_id, display_name)
+            VALUES ($1, $2, $3)
+            RETURNING id, tournament_id, user_id, display_name, created_at
+            "#,
+        )
+        .bind(tournament_id)
+        .bind(Some(user_id))
+        .bind(display_name)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
+        Ok(TournamentEntry {
+            id: rec.id,
+            tournament_id: rec.tournament_id,
+            user_id: rec.user_id,
+            display_name: rec.display_name,
+            created_at: rec.created_at,
+        })
+    }
+
     pub async fn add_entry(
         &self,
         tournament_id: i64,

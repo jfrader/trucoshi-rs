@@ -526,6 +526,26 @@ fn default_tournament_limit() -> i64 {
     20
 }
 
+fn viewer_user_id_from_headers(
+    headers: &HeaderMap,
+    tokens: &trucoshi_auth::tokens::TokenConfig,
+) -> Result<Option<i64>, ApiError> {
+    // Public endpoint behavior: if a bearer token is provided, use it.
+    // If the token is present but invalid, return 401 (don't silently ignore auth errors).
+    if let Some(Authorization(bearer)) = headers.typed_get::<Authorization<Bearer>>() {
+        let data = trucoshi_auth::jwt::decode_access_jwt(tokens, bearer.token())
+            .map_err(|_| ApiError::unauthorized("invalid token"))?;
+        let user_id: i64 = data
+            .claims
+            .sub
+            .parse()
+            .map_err(|_| ApiError::unauthorized("invalid sub"))?;
+        Ok(Some(user_id))
+    } else {
+        Ok(None)
+    }
+}
+
 async fn list_tournaments(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -534,22 +554,7 @@ async fn list_tournaments(
     let repo = trucoshi_server::tournaments::repo::TournamentsRepo::new(state.store.pool.clone());
     let limit = q.limit.clamp(1, 200);
 
-    // Public endpoint, but if a bearer token is provided, use it to also show
-    // the caller's draft tournaments. If the token is present but invalid,
-    // return 401 (don't silently ignore auth errors).
-    let viewer_user_id =
-        if let Some(Authorization(bearer)) = headers.typed_get::<Authorization<Bearer>>() {
-            let data = trucoshi_auth::jwt::decode_access_jwt(&state.tokens, bearer.token())
-                .map_err(|_| ApiError::unauthorized("invalid token"))?;
-            let user_id: i64 = data
-                .claims
-                .sub
-                .parse()
-                .map_err(|_| ApiError::unauthorized("invalid sub"))?;
-            Some(user_id)
-        } else {
-            None
-        };
+    let viewer_user_id = viewer_user_id_from_headers(&headers, &state.tokens)?;
 
     let list = repo
         .list_visible_tournaments(limit, viewer_user_id)
@@ -560,14 +565,32 @@ async fn list_tournaments(
 
 async fn get_tournament(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<Json<trucoshi_server::tournaments::types::Tournament>, ApiError> {
+    use trucoshi_server::tournaments::types::TournamentStatus;
+
     let repo = trucoshi_server::tournaments::repo::TournamentsRepo::new(state.store.pool.clone());
     let t = repo
         .get_tournament(id)
         .await
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("tournament not found"))?;
+
+    let viewer_user_id = viewer_user_id_from_headers(&headers, &state.tokens)?;
+    let is_owner = viewer_user_id.is_some() && t.owner_user_id == viewer_user_id;
+
+    // Keep visibility rules simple and consistent:
+    // - OPEN/STARTED/FINISHED are public
+    // - DRAFT/CANCELLED are owner-only
+    let visible = match t.status {
+        TournamentStatus::Draft | TournamentStatus::Cancelled => is_owner,
+        TournamentStatus::Open | TournamentStatus::Started | TournamentStatus::Finished => true,
+    };
+
+    if !visible {
+        return Err(ApiError::not_found("tournament not found"));
+    }
 
     Ok(Json(t))
 }
@@ -580,18 +603,29 @@ struct ListTournamentEntriesQuery {
 
 async fn list_tournament_entries(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<i64>,
     Query(q): Query<ListTournamentEntriesQuery>,
 ) -> Result<Json<Vec<trucoshi_server::tournaments::types::TournamentEntry>>, ApiError> {
+    use trucoshi_server::tournaments::types::TournamentStatus;
+
     let repo = trucoshi_server::tournaments::repo::TournamentsRepo::new(state.store.pool.clone());
 
-    // Normalize to 404 if tournament doesn't exist.
-    if repo
+    let t = repo
         .get_tournament(id)
         .await
         .map_err(ApiError::internal)?
-        .is_none()
-    {
+        .ok_or_else(|| ApiError::not_found("tournament not found"))?;
+
+    let viewer_user_id = viewer_user_id_from_headers(&headers, &state.tokens)?;
+    let is_owner = viewer_user_id.is_some() && t.owner_user_id == viewer_user_id;
+
+    let visible = match t.status {
+        TournamentStatus::Draft | TournamentStatus::Cancelled => is_owner,
+        TournamentStatus::Open | TournamentStatus::Started | TournamentStatus::Finished => true,
+    };
+
+    if !visible {
         return Err(ApiError::not_found("tournament not found"));
     }
 
@@ -744,26 +778,25 @@ async fn join_tournament(
         .ok_or_else(|| ApiError::not_found("tournament not found"))?;
 
     match t.status {
-        TournamentStatus::Draft | TournamentStatus::Open => {}
+        TournamentStatus::Open => {}
+        TournamentStatus::Draft => return Err(ApiError::bad_request("tournament not open")),
         TournamentStatus::Started | TournamentStatus::Finished => {
             return Err(ApiError::bad_request("tournament already started"));
         }
         TournamentStatus::Cancelled => return Err(ApiError::bad_request("tournament cancelled")),
     }
 
-    let max_players = (t.max_players as i64).max(0);
-    let count = repo.count_entries(id).await.map_err(ApiError::internal)?;
-    if max_players > 0 && count >= max_players {
-        return Err(ApiError::bad_request("tournament full"));
-    }
-
     let entry = repo
-        .add_entry(id, Some(user_id), display_name)
+        .add_entry_checked_open(id, user_id, display_name)
         .await
         .map_err(|e| {
             let msg = e.to_string();
             if msg.contains("duplicate") || msg.contains("UNIQUE") {
                 ApiError::bad_request("already joined")
+            } else if msg.contains("TOURNAMENT_FULL") {
+                ApiError::bad_request("tournament full")
+            } else if msg.contains("TOURNAMENT_NOT_OPEN") {
+                ApiError::bad_request("tournament not open")
             } else {
                 ApiError::internal(e)
             }
