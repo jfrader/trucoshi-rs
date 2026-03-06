@@ -25,6 +25,19 @@ pub enum GameHistoryEvent {
         user_id: i64,
         display_name: String,
     },
+
+    /// Generic append-only event for actions that occurred during gameplay.
+    ///
+    /// Stored as a row in `game_match_events` with `type=ty` and `data` as provided.
+    GameAction {
+        match_id: String,
+        actor_seat_idx: u8,
+        actor_team_idx: u8,
+        actor_user_id: i64,
+        ty: String,
+        data: Value,
+    },
+
     MatchStarted {
         match_id: String,
     },

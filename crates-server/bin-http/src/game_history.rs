@@ -237,6 +237,49 @@ pub async fn run_game_history_worker<B: GameHistoryBackend>(
                 }
             }
 
+            GameHistoryEvent::GameAction {
+                match_id,
+                actor_seat_idx,
+                actor_team_idx,
+                actor_user_id,
+                ty,
+                data,
+            } => {
+                let Some(&db_id) = st.match_db_ids.get(&match_id) else {
+                    debug!(%match_id, "game_history: drop GameAction (unknown match)");
+                    continue;
+                };
+
+                let seq = st.seq_next(&match_id);
+                let event_type = ty;
+                let payload = json!({
+                    "ws_match_id": match_id.clone(),
+                    "action": {
+                        "actor": {
+                            "seat_idx": actor_seat_idx,
+                            "team_idx": actor_team_idx,
+                            "user_id": actor_user_id,
+                        },
+                        "type": event_type.clone(),
+                        "data": data,
+                    }
+                });
+
+                if let Err(e) = backend
+                    .gh_append_event(
+                        db_id,
+                        seq,
+                        Some(i32::from(actor_seat_idx)),
+                        db_user_id(actor_user_id),
+                        event_type.as_str(),
+                        payload,
+                    )
+                    .await
+                {
+                    warn!(error = %e, %match_id, db_id, "game_history: append game action failed");
+                }
+            }
+
             GameHistoryEvent::MatchStarted { match_id } => {
                 let Some(&db_id) = st.match_db_ids.get(&match_id) else {
                     debug!(%match_id, "game_history: drop MatchStarted (unknown match)");
@@ -398,6 +441,16 @@ mod tests {
         })
         .unwrap();
 
+        tx.send(GameHistoryEvent::GameAction {
+            match_id: "m1".into(),
+            actor_seat_idx: 0,
+            actor_team_idx: 0,
+            actor_user_id: -1,
+            ty: "game.play_card".into(),
+            data: json!({ "card_idx": 0, "hand_no": 0 }),
+        })
+        .unwrap();
+
         tx.send(GameHistoryEvent::MatchFinished {
             match_id: "m1".into(),
             team_points: [1, 0],
@@ -435,11 +488,18 @@ mod tests {
                 ty: "match.start".into()
             }
         );
-        assert_eq!(ops[6], Op::Finish);
         assert_eq!(
-            ops[7],
+            ops[6],
             Op::AppendEvent {
                 seq: 3,
+                ty: "game.play_card".into()
+            }
+        );
+        assert_eq!(ops[7], Op::Finish);
+        assert_eq!(
+            ops[8],
+            Op::AppendEvent {
+                seq: 4,
                 ty: "match.finish".into()
             }
         );

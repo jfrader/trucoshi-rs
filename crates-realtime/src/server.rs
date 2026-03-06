@@ -819,12 +819,16 @@ impl Realtime {
                 let msid = d.match_id;
                 let card_idx = d.card_idx;
 
-                let (active_msid, pkey) = {
+                let (active_msid, pkey, actor_user_id) = {
                     let s = self.state.lock().await;
                     let Some(sess) = s.sessions.get(&session_id) else {
                         return;
                     };
-                    (sess.active_match_id.clone(), sess.player_key.clone())
+                    (
+                        sess.active_match_id.clone(),
+                        sess.player_key.clone(),
+                        sess.user_id,
+                    )
                 };
 
                 let (active_msid, pkey) = match (active_msid, pkey) {
@@ -854,6 +858,7 @@ impl Realtime {
 
                 // Apply move under lock.
                 let mut err: Option<(String, String)> = None;
+                let mut history_action: Option<GameHistoryEvent> = None;
                 let mut history_finish: Option<([u8; 2], String)> = None;
                 {
                     let mut s = self.state.lock().await;
@@ -915,6 +920,14 @@ impl Realtime {
                                 let teams_by_player_idx =
                                     m.players.iter().map(|p| p.team.as_u8()).collect::<Vec<_>>();
 
+                                let actor_seat_idx = u8::try_from(from_player_idx).unwrap_or(0);
+                                let actor_team_idx = m
+                                    .players
+                                    .get(from_player_idx)
+                                    .map(|p| p.team.as_u8())
+                                    .unwrap_or(0);
+                                let hand_no_at_action = m.hand_no;
+
                                 let outcome = g.play_card(
                                     card_idx,
                                     &teams_by_player_idx,
@@ -926,10 +939,53 @@ impl Realtime {
                                     PlayOutcome::Invalid => {
                                         err = Some(("INVALID_CARD".into(), "invalid card".into()));
                                     }
+                                    PlayOutcome::TurnAdvanced => {
+                                        history_action = Some(GameHistoryEvent::GameAction {
+                                            match_id: msid.clone(),
+                                            actor_seat_idx,
+                                            actor_team_idx,
+                                            actor_user_id,
+                                            ty: "game.play_card".into(),
+                                            data: serde_json::json!({
+                                                "hand_no": hand_no_at_action,
+                                                "card_idx": card_idx,
+                                                "outcome": "turn_advanced",
+                                            }),
+                                        });
+                                    }
+                                    PlayOutcome::TrickEnded => {
+                                        history_action = Some(GameHistoryEvent::GameAction {
+                                            match_id: msid.clone(),
+                                            actor_seat_idx,
+                                            actor_team_idx,
+                                            actor_user_id,
+                                            ty: "game.play_card".into(),
+                                            data: serde_json::json!({
+                                                "hand_no": hand_no_at_action,
+                                                "card_idx": card_idx,
+                                                "outcome": "trick_ended",
+                                            }),
+                                        });
+                                    }
                                     PlayOutcome::HandEnded {
                                         winner_team_idx,
                                         points,
                                     } => {
+                                        history_action = Some(GameHistoryEvent::GameAction {
+                                            match_id: msid.clone(),
+                                            actor_seat_idx,
+                                            actor_team_idx,
+                                            actor_user_id,
+                                            ty: "game.play_card".into(),
+                                            data: serde_json::json!({
+                                                "hand_no": hand_no_at_action,
+                                                "card_idx": card_idx,
+                                                "outcome": "hand_ended",
+                                                "winner_team_idx": winner_team_idx,
+                                                "points": points,
+                                            }),
+                                        });
+
                                         if winner_team_idx < 2 {
                                             m.team_points[winner_team_idx as usize] = m.team_points
                                                 [winner_team_idx as usize]
@@ -972,7 +1028,6 @@ impl Realtime {
                                                 ));
                                         }
                                     }
-                                    _ => {}
                                 }
                             }
                         }
@@ -982,6 +1037,10 @@ impl Realtime {
                 if let Some((code, msg)) = err {
                     self.send_to(session_id, Self::err_out(id, code, msg)).await;
                     return;
+                }
+
+                if let Some(ev) = history_action.take() {
+                    self.emit_history(ev);
                 }
 
                 if let Some((team_points, reason)) = history_finish.take() {
@@ -1009,13 +1068,18 @@ impl Realtime {
             C2sMessage::GameSay(d) => {
                 let msid = d.match_id;
                 let command = d.command;
+                let command_for_history = command.clone();
 
-                let (active_msid, pkey) = {
+                let (active_msid, pkey, actor_user_id) = {
                     let s = self.state.lock().await;
                     let Some(sess) = s.sessions.get(&session_id) else {
                         return;
                     };
-                    (sess.active_match_id.clone(), sess.player_key.clone())
+                    (
+                        sess.active_match_id.clone(),
+                        sess.player_key.clone(),
+                        sess.user_id,
+                    )
                 };
 
                 let (active_msid, pkey) = match (active_msid, pkey) {
@@ -1044,6 +1108,7 @@ impl Realtime {
                 }
 
                 let mut err: Option<(String, String)> = None;
+                let mut history_action: Option<GameHistoryEvent> = None;
                 let mut history_finish: Option<([u8; 2], String)> = None;
                 {
                     let mut s = self.state.lock().await;
@@ -1110,6 +1175,19 @@ impl Realtime {
                                 let teams_by_player_idx =
                                     m.players.iter().map(|p| p.team.as_u8()).collect::<Vec<_>>();
 
+                                let actor_seat_idx = u8::try_from(from_player_idx).unwrap_or(0);
+                                let actor_team_idx = m
+                                    .players
+                                    .get(from_player_idx)
+                                    .map(|p| p.team.as_u8())
+                                    .unwrap_or(0);
+                                let hand_no_at_action = m.hand_no;
+
+                                let command_value = serde_json::to_value(&command_for_history)
+                                    .unwrap_or_else(|_| {
+                                        serde_json::json!("failed_to_serialize_command")
+                                    });
+
                                 let now_ms = Self::now_ms();
                                 let out = g.apply_command(
                                     command,
@@ -1119,48 +1197,83 @@ impl Realtime {
                                     now_ms,
                                 );
 
-                                if let CommandOutcome::HandEnded {
-                                    winner_team_idx,
-                                    points,
-                                } = out
-                                {
-                                    if winner_team_idx < 2 {
-                                        m.team_points[winner_team_idx as usize] = m.team_points
-                                            [winner_team_idx as usize]
-                                            .saturating_add(points);
+                                match out {
+                                    CommandOutcome::None => {
+                                        history_action = Some(GameHistoryEvent::GameAction {
+                                            match_id: msid.clone(),
+                                            actor_seat_idx,
+                                            actor_team_idx,
+                                            actor_user_id,
+                                            ty: "game.say".into(),
+                                            data: serde_json::json!({
+                                                "hand_no": hand_no_at_action,
+                                                "command": command_value,
+                                                "outcome": "none",
+                                                "server_time_ms": now_ms,
+                                            }),
+                                        });
                                     }
 
-                                    let match_points = m.options.match_points.max(1);
-                                    if winner_team_idx < 2
-                                        && m.team_points[winner_team_idx as usize] >= match_points
-                                    {
-                                        m.phase = MatchPhase::Finished;
-                                        history_finish =
-                                            Some((m.team_points, "score_reached".into()));
-                                        g.public.hand_state = HandState::Finished;
-                                        g.public.winner_team_idx = Some(winner_team_idx);
-                                    } else {
-                                        // Match continues: broadcast the finished hand first, then
-                                        // start the next hand with a follow-up update.
-                                        g.public.hand_state = HandState::Finished;
-                                        g.public.winner_team_idx = Some(winner_team_idx);
+                                    CommandOutcome::HandEnded {
+                                        winner_team_idx,
+                                        points,
+                                    } => {
+                                        history_action = Some(GameHistoryEvent::GameAction {
+                                            match_id: msid.clone(),
+                                            actor_seat_idx,
+                                            actor_team_idx,
+                                            actor_user_id,
+                                            ty: "game.say".into(),
+                                            data: serde_json::json!({
+                                                "hand_no": hand_no_at_action,
+                                                "command": command_value,
+                                                "outcome": "hand_ended",
+                                                "winner_team_idx": winner_team_idx,
+                                                "points": points,
+                                                "server_time_ms": now_ms,
+                                            }),
+                                        });
 
-                                        let players_len = m.players.len();
-                                        let next_forehand = if players_len == 0 {
-                                            0
+                                        if winner_team_idx < 2 {
+                                            m.team_points[winner_team_idx as usize] = m.team_points
+                                                [winner_team_idx as usize]
+                                                .saturating_add(points);
+                                        }
+
+                                        let match_points = m.options.match_points.max(1);
+                                        if winner_team_idx < 2
+                                            && m.team_points[winner_team_idx as usize]
+                                                >= match_points
+                                        {
+                                            m.phase = MatchPhase::Finished;
+                                            history_finish =
+                                                Some((m.team_points, "score_reached".into()));
+                                            g.public.hand_state = HandState::Finished;
+                                            g.public.winner_team_idx = Some(winner_team_idx);
                                         } else {
-                                            (g.public.forehand_seat_idx + 1) % (players_len as u8)
-                                        };
+                                            // Match continues: broadcast the finished hand first, then
+                                            // start the next hand with a follow-up update.
+                                            g.public.hand_state = HandState::Finished;
+                                            g.public.winner_team_idx = Some(winner_team_idx);
 
-                                        m.hand_no = m.hand_no.saturating_add(1);
-                                        m.pending_game =
-                                            Some(trucoshi_game::GameState::new_with_forehand(
-                                                players_len,
-                                                Self::seed_for_hand(&msid, m.hand_no),
-                                                m.options.turn_time_ms,
-                                                Self::now_ms(),
-                                                next_forehand,
-                                            ));
+                                            let players_len = m.players.len();
+                                            let next_forehand = if players_len == 0 {
+                                                0
+                                            } else {
+                                                (g.public.forehand_seat_idx + 1)
+                                                    % (players_len as u8)
+                                            };
+
+                                            m.hand_no = m.hand_no.saturating_add(1);
+                                            m.pending_game =
+                                                Some(trucoshi_game::GameState::new_with_forehand(
+                                                    players_len,
+                                                    Self::seed_for_hand(&msid, m.hand_no),
+                                                    m.options.turn_time_ms,
+                                                    Self::now_ms(),
+                                                    next_forehand,
+                                                ));
+                                        }
                                     }
                                 }
                             }
@@ -1171,6 +1284,10 @@ impl Realtime {
                 if let Some((code, msg)) = err {
                     self.send_to(session_id, Self::err_out(id, code, msg)).await;
                     return;
+                }
+
+                if let Some(ev) = history_action.take() {
+                    self.emit_history(ev);
                 }
 
                 if let Some((team_points, reason)) = history_finish.take() {
@@ -2288,19 +2405,44 @@ mod e2e_smoke_tests {
             .await;
         }
 
-        // Collect the first 4 lifecycle events.
-        let mut got = Vec::new();
-        for _ in 0..4 {
-            let ev = timeout(Duration::from_millis(200), history_rx.recv())
+        // We now emit gameplay actions to history, so we can't assume MatchFinished is the 4th
+        // event. Instead, assert that lifecycle events happen in order and that at least one
+        // gameplay action was observed before the match finished.
+
+        let ev0 = timeout(Duration::from_millis(200), history_rx.recv())
+            .await
+            .expect("history event timeout")
+            .expect("history channel closed");
+        assert!(matches!(ev0, GameHistoryEvent::MatchCreated { .. }));
+
+        let ev1 = timeout(Duration::from_millis(200), history_rx.recv())
+            .await
+            .expect("history event timeout")
+            .expect("history channel closed");
+        assert!(matches!(ev1, GameHistoryEvent::PlayerJoined { .. }));
+
+        let ev2 = timeout(Duration::from_millis(200), history_rx.recv())
+            .await
+            .expect("history event timeout")
+            .expect("history channel closed");
+        assert!(matches!(ev2, GameHistoryEvent::MatchStarted { .. }));
+
+        let mut saw_action = false;
+        loop {
+            let ev = timeout(Duration::from_millis(500), history_rx.recv())
                 .await
                 .expect("history event timeout")
                 .expect("history channel closed");
-            got.push(ev);
+
+            if matches!(ev, GameHistoryEvent::GameAction { .. }) {
+                saw_action = true;
+            }
+
+            if matches!(ev, GameHistoryEvent::MatchFinished { .. }) {
+                break;
+            }
         }
 
-        assert!(matches!(got[0], GameHistoryEvent::MatchCreated { .. }));
-        assert!(matches!(got[1], GameHistoryEvent::PlayerJoined { .. }));
-        assert!(matches!(got[2], GameHistoryEvent::MatchStarted { .. }));
-        assert!(matches!(got[3], GameHistoryEvent::MatchFinished { .. }));
+        assert!(saw_action, "expected at least one gameplay history action");
     }
 }
