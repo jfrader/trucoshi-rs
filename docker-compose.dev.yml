@@ -42,11 +42,8 @@ services:
 
     ports:
       - "2992:2992"
-    healthcheck:
-      test: ["CMD", "sh", "-c", "wget -qO- http://127.0.0.1:2992/healthz >/dev/null"]
-      interval: 5s
-      timeout: 3s
-      retries: 30
+    # Runtime image is very slim (no curl/wget), so avoid container healthchecks here.
+    # (We can still verify from the host via curl and logs.)
 
 volumes:
   trucoshi_pg:
