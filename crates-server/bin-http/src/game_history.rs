@@ -237,6 +237,46 @@ pub async fn run_game_history_worker<B: GameHistoryBackend>(
                 }
             }
 
+            GameHistoryEvent::PlayerLeft {
+                match_id,
+                seat_idx,
+                team_idx,
+                user_id,
+                display_name,
+                reason,
+            } => {
+                let Some(&db_id) = st.match_db_ids.get(&match_id) else {
+                    debug!(%match_id, "game_history: drop PlayerLeft (unknown match)");
+                    continue;
+                };
+
+                let seq = st.seq_next(&match_id);
+                let data = json!({
+                    "ws_match_id": match_id,
+                    "player": {
+                        "seat_idx": seat_idx,
+                        "team_idx": team_idx,
+                        "user_id": user_id,
+                        "display_name": display_name,
+                    },
+                    "reason": reason,
+                });
+
+                if let Err(e) = backend
+                    .gh_append_event(
+                        db_id,
+                        seq,
+                        Some(i32::from(seat_idx)),
+                        db_user_id(user_id),
+                        "match.leave",
+                        data,
+                    )
+                    .await
+                {
+                    warn!(error = %e, %match_id, db_id, "game_history: append match.leave failed");
+                }
+            }
+
             GameHistoryEvent::GameAction {
                 match_id,
                 actor_seat_idx,
@@ -451,6 +491,16 @@ mod tests {
         })
         .unwrap();
 
+        tx.send(GameHistoryEvent::PlayerLeft {
+            match_id: "m1".into(),
+            seat_idx: 1,
+            team_idx: 1,
+            user_id: -2,
+            display_name: "p2".into(),
+            reason: "client_leave".into(),
+        })
+        .unwrap();
+
         tx.send(GameHistoryEvent::MatchFinished {
             match_id: "m1".into(),
             team_points: [1, 0],
@@ -495,11 +545,18 @@ mod tests {
                 ty: "game.play_card".into()
             }
         );
-        assert_eq!(ops[7], Op::Finish);
         assert_eq!(
-            ops[8],
+            ops[7],
             Op::AppendEvent {
                 seq: 4,
+                ty: "match.leave".into()
+            }
+        );
+        assert_eq!(ops[8], Op::Finish);
+        assert_eq!(
+            ops[9],
+            Op::AppendEvent {
+                seq: 5,
                 ty: "match.finish".into()
             }
         );

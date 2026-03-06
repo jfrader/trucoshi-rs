@@ -180,20 +180,22 @@ impl Realtime {
         }
 
         // cleanup
-        let mut maybe_leave: Option<(String, String)> = None;
+        let mut maybe_leave: Option<(String, String, i64)> = None;
         {
             let mut s = self.state.lock().await;
             if let Some(sess) = s.sessions.remove(&session_id) {
                 if let (Some(msid), Some(pkey)) = (sess.active_match_id, sess.player_key) {
-                    maybe_leave = Some((msid, pkey));
+                    maybe_leave = Some((msid, pkey, sess.user_id));
                 }
             }
             s.connections = s.connections.saturating_sub(1);
             debug!(connections = s.connections, %session_id, "ws disconnected");
         }
 
-        if let Some((msid, pkey)) = maybe_leave {
-            let removed = self.leave_match_internal(session_id, &msid, &pkey).await;
+        if let Some((msid, pkey, user_id)) = maybe_leave {
+            let removed = self
+                .leave_match_internal(session_id, &msid, &pkey, user_id, "disconnect")
+                .await;
             if removed {
                 self.broadcast_lobby_match_remove(&msid).await;
             } else {
@@ -450,12 +452,16 @@ impl Realtime {
             }
 
             C2sMessage::MatchLeave(d) => {
-                let (msid, pkey) = {
+                let (msid, pkey, user_id) = {
                     let s = self.state.lock().await;
                     let Some(sess) = s.sessions.get(&session_id) else {
                         return;
                     };
-                    (sess.active_match_id.clone(), sess.player_key.clone())
+                    (
+                        sess.active_match_id.clone(),
+                        sess.player_key.clone(),
+                        sess.user_id,
+                    )
                 };
 
                 let (msid, pkey) = match (msid, pkey) {
@@ -483,7 +489,9 @@ impl Realtime {
                     return;
                 }
 
-                let removed = self.leave_match_internal(session_id, &msid, &pkey).await;
+                let removed = self
+                    .leave_match_internal(session_id, &msid, &pkey, user_id, "client_leave")
+                    .await;
                 if removed {
                     self.broadcast_lobby_match_remove(&msid).await;
                 } else {
@@ -1810,8 +1818,16 @@ impl Realtime {
     }
 
     /// Returns `true` if the match was removed (became empty).
-    async fn leave_match_internal(&self, session_id: Uuid, match_id: &str, key: &str) -> bool {
+    async fn leave_match_internal(
+        &self,
+        session_id: Uuid,
+        match_id: &str,
+        key: &str,
+        user_id: i64,
+        reason: &str,
+    ) -> bool {
         let mut removed = false;
+        let mut history_left: Option<GameHistoryEvent> = None;
         let mut history_finish: Option<[u8; 2]> = None;
         {
             let mut s = self.state.lock().await;
@@ -1823,6 +1839,21 @@ impl Realtime {
 
             if let Some(m) = s.matches.get_mut(match_id) {
                 m.participants.remove(&session_id);
+
+                // Capture the leaving seat/team/name before we remove them.
+                if let Some(idx) = m.players.iter().position(|p| p.key == key) {
+                    if let Some(p) = m.players.get(idx) {
+                        history_left = Some(GameHistoryEvent::PlayerLeft {
+                            match_id: match_id.to_string(),
+                            seat_idx: u8::try_from(idx).unwrap_or(0),
+                            team_idx: p.team.as_u8(),
+                            user_id,
+                            display_name: p.name.clone(),
+                            reason: reason.to_string(),
+                        });
+                    }
+                }
+
                 m.players.retain(|p| p.key != key);
 
                 // If the owner left, transfer ownership to the first remaining player.
@@ -1853,6 +1884,10 @@ impl Realtime {
                     removed = true;
                 }
             }
+        }
+
+        if let Some(ev) = history_left.take() {
+            self.emit_history(ev);
         }
 
         if let Some(team_points) = history_finish.take() {

@@ -26,6 +26,16 @@ pub enum GameHistoryEvent {
         display_name: String,
     },
 
+    PlayerLeft {
+        match_id: String,
+        seat_idx: u8,
+        team_idx: u8,
+        user_id: i64,
+        display_name: String,
+        /// Best-effort reason string (e.g. "client_leave" or "disconnect").
+        reason: String,
+    },
+
     /// Generic append-only event for actions that occurred during gameplay.
     ///
     /// Stored as a row in `game_match_events` with `type=ty` and `data` as provided.
