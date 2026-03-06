@@ -277,6 +277,51 @@ pub async fn run_game_history_worker<B: GameHistoryBackend>(
                 }
             }
 
+            GameHistoryEvent::SpectatorJoined { match_id, user_id } => {
+                let Some(&db_id) = st.match_db_ids.get(&match_id) else {
+                    debug!(%match_id, "game_history: drop SpectatorJoined (unknown match)");
+                    continue;
+                };
+
+                let seq = st.seq_next(&match_id);
+                let data = json!({
+                    "ws_match_id": match_id,
+                    "user_id": user_id,
+                });
+
+                if let Err(e) = backend
+                    .gh_append_event(db_id, seq, None, db_user_id(user_id), "match.watch", data)
+                    .await
+                {
+                    warn!(error = %e, db_id, "game_history: append match.watch failed");
+                }
+            }
+
+            GameHistoryEvent::SpectatorLeft {
+                match_id,
+                user_id,
+                reason,
+            } => {
+                let Some(&db_id) = st.match_db_ids.get(&match_id) else {
+                    debug!(%match_id, "game_history: drop SpectatorLeft (unknown match)");
+                    continue;
+                };
+
+                let seq = st.seq_next(&match_id);
+                let data = json!({
+                    "ws_match_id": match_id,
+                    "user_id": user_id,
+                    "reason": reason,
+                });
+
+                if let Err(e) = backend
+                    .gh_append_event(db_id, seq, None, db_user_id(user_id), "match.unwatch", data)
+                    .await
+                {
+                    warn!(error = %e, db_id, "game_history: append match.unwatch failed");
+                }
+            }
+
             GameHistoryEvent::GameAction {
                 match_id,
                 actor_seat_idx,
@@ -674,6 +719,96 @@ mod tests {
                 seq: 2,
                 ty: "match.ready".into(),
                 actor_user_id: Some(42),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_records_spectator_watch_and_unwatch() {
+        let backend = MockBackend::default();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let task = tokio::spawn(run_game_history_worker(backend.clone(), rx));
+
+        tx.send(GameHistoryEvent::MatchCreated {
+            match_id: "m1".into(),
+            server_version: "0.1.0".into(),
+            protocol_version: 2,
+            rng_seed: 123,
+            options: json!({ "ws_match_id": "m1" }),
+            owner: HistoryPlayer {
+                seat_idx: 0,
+                team_idx: 0,
+                user_id: 42,
+                display_name: "p1".into(),
+            },
+        })
+        .unwrap();
+
+        // Guest spectator (negative id) should not FK into `users`.
+        tx.send(GameHistoryEvent::SpectatorJoined {
+            match_id: "m1".into(),
+            user_id: -1,
+        })
+        .unwrap();
+
+        tx.send(GameHistoryEvent::SpectatorLeft {
+            match_id: "m1".into(),
+            user_id: -1,
+            reason: "disconnect".into(),
+        })
+        .unwrap();
+
+        // Registered spectator should FK.
+        tx.send(GameHistoryEvent::SpectatorJoined {
+            match_id: "m1".into(),
+            user_id: 99,
+        })
+        .unwrap();
+
+        drop(tx);
+        task.await.unwrap();
+
+        let ops = backend.take_ops().await;
+
+        assert_eq!(ops[0], Op::CreateMatch);
+        assert_eq!(
+            ops[1],
+            Op::AddPlayer {
+                seat_idx: 0,
+                user_id: Some(42)
+            }
+        );
+        assert_eq!(
+            ops[2],
+            Op::AppendEvent {
+                seq: 0,
+                ty: "match.create".into(),
+                actor_user_id: Some(42),
+            }
+        );
+        assert_eq!(
+            ops[3],
+            Op::AppendEvent {
+                seq: 1,
+                ty: "match.watch".into(),
+                actor_user_id: None,
+            }
+        );
+        assert_eq!(
+            ops[4],
+            Op::AppendEvent {
+                seq: 2,
+                ty: "match.unwatch".into(),
+                actor_user_id: None,
+            }
+        );
+        assert_eq!(
+            ops[5],
+            Op::AppendEvent {
+                seq: 3,
+                ty: "match.watch".into(),
+                actor_user_id: Some(99),
             }
         );
     }

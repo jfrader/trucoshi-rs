@@ -18,6 +18,7 @@ pub enum GameHistoryEvent {
         options: Value,
         owner: HistoryPlayer,
     },
+
     PlayerJoined {
         match_id: String,
         seat_idx: u8,
@@ -32,6 +33,18 @@ pub enum GameHistoryEvent {
         team_idx: u8,
         user_id: i64,
         display_name: String,
+        /// Best-effort reason string (e.g. "client_leave" or "disconnect").
+        reason: String,
+    },
+
+    SpectatorJoined {
+        match_id: String,
+        user_id: i64,
+    },
+
+    SpectatorLeft {
+        match_id: String,
+        user_id: i64,
         /// Best-effort reason string (e.g. "client_leave" or "disconnect").
         reason: String,
     },

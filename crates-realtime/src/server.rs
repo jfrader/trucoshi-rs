@@ -204,7 +204,8 @@ impl Realtime {
                 }
             } else {
                 // spectator: just detach from match participants / rooms
-                self.leave_match_watch_internal(session_id, &msid).await;
+                self.leave_match_watch_internal(session_id, &msid, user_id, "disconnect")
+                    .await;
 
                 // Notify remaining participants and refresh lobby counts.
                 self.emit_match_update_to_match(&msid, None).await;
@@ -482,20 +483,26 @@ impl Realtime {
                 }
 
                 // Add as a participant (but do not create a player seat).
-                let exists = {
+                let (exists, inserted, actor_user_id) = {
                     let mut s = self.state.lock().await;
                     match s.matches.get_mut(&match_id) {
                         Some(m) => {
-                            m.participants.insert(session_id);
+                            let inserted = m.participants.insert(session_id);
+
+                            let actor_user_id = s
+                                .sessions
+                                .get(&session_id)
+                                .map(|sess| sess.user_id)
+                                .unwrap_or(0);
 
                             if let Some(sess) = s.sessions.get_mut(&session_id) {
                                 sess.active_match_id = Some(match_id.clone());
                                 sess.player_key = None;
                             }
 
-                            true
+                            (true, inserted, actor_user_id)
                         }
-                        None => false,
+                        None => (false, false, 0),
                     }
                 };
 
@@ -506,6 +513,13 @@ impl Realtime {
                     )
                     .await;
                     return;
+                }
+
+                if inserted {
+                    self.emit_history(GameHistoryEvent::SpectatorJoined {
+                        match_id: match_id.clone(),
+                        user_id: actor_user_id,
+                    });
                 }
 
                 // Auto-join the match chat room (room id == match_id)
@@ -577,7 +591,8 @@ impl Realtime {
                     removed
                 } else {
                     // spectator: just detach
-                    self.leave_match_watch_internal(session_id, &msid).await;
+                    self.leave_match_watch_internal(session_id, &msid, user_id, "client_leave")
+                        .await;
 
                     // Notify remaining participants and refresh lobby counts.
                     self.emit_match_update_to_match(&msid, None).await;
@@ -2170,12 +2185,19 @@ impl Realtime {
     /// Detach a spectator/watch session from a match.
     ///
     /// Unlike `leave_match_internal`, this does not remove a player seat.
-    async fn leave_match_watch_internal(&self, session_id: Uuid, match_id: &str) {
+    async fn leave_match_watch_internal(
+        &self,
+        session_id: Uuid,
+        match_id: &str,
+        user_id: i64,
+        reason: &str,
+    ) {
+        let mut removed = false;
         {
             let mut s = self.state.lock().await;
 
             if let Some(m) = s.matches.get_mut(match_id) {
-                m.participants.remove(&session_id);
+                removed = m.participants.remove(&session_id);
             }
 
             if let Some(sess) = s.sessions.get_mut(&session_id) {
@@ -2184,6 +2206,14 @@ impl Realtime {
                 }
                 sess.player_key = None;
             }
+        }
+
+        if removed {
+            self.emit_history(GameHistoryEvent::SpectatorLeft {
+                match_id: match_id.to_string(),
+                user_id,
+                reason: reason.to_string(),
+            });
         }
 
         // Match chat room id == match_id.
@@ -3251,5 +3281,110 @@ mod e2e_smoke_tests {
             saw_gameplay_action,
             "expected at least one gameplay history action (game.*)"
         );
+    }
+
+    #[tokio::test]
+    async fn history_events_emitted_for_spectator_watch_and_leave() {
+        use crate::history::GameHistoryEvent;
+        use tokio::time::{Duration, timeout};
+
+        let (history_tx, mut history_rx) = tokio::sync::mpsc::unbounded_channel();
+        let rt = Realtime::new_with_history(history_tx);
+
+        let (s1, _rx1) = add_session(&rt, -1).await;
+        let (spectator, _rx_spec) = add_session(&rt, -3).await;
+
+        rt.handle_message(
+            s1,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchCreate(MatchCreateData {
+                    name: "p1".into(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                    options: Some(MatchOptions {
+                        max_players: 2,
+                        flor: true,
+                        match_points: 3,
+                        turn_time_ms: 30_000,
+                    })
+                    .into(),
+                }),
+            },
+        )
+        .await;
+
+        let match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&s1)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("creator should be in a match")
+        };
+
+        rt.handle_message(
+            spectator,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchWatch(MatchWatchData {
+                    match_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+
+        rt.handle_message(
+            spectator,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchLeave(MatchRefData {
+                    match_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+
+        let mut saw_watch = false;
+        let mut saw_unwatch = false;
+
+        for _ in 0..20 {
+            let ev = timeout(Duration::from_millis(500), history_rx.recv())
+                .await
+                .expect("history event timeout")
+                .expect("history channel closed");
+
+            match ev {
+                GameHistoryEvent::SpectatorJoined {
+                    match_id: mid,
+                    user_id,
+                } => {
+                    if mid == match_id {
+                        assert_eq!(user_id, -3);
+                        saw_watch = true;
+                    }
+                }
+                GameHistoryEvent::SpectatorLeft {
+                    match_id: mid,
+                    user_id,
+                    reason,
+                } => {
+                    if mid == match_id {
+                        assert_eq!(user_id, -3);
+                        assert_eq!(reason, "client_leave");
+                        saw_unwatch = true;
+                    }
+                }
+                _ => {}
+            }
+
+            if saw_watch && saw_unwatch {
+                break;
+            }
+        }
+
+        assert!(saw_watch, "expected SpectatorJoined history event");
+        assert!(saw_unwatch, "expected SpectatorLeft history event");
     }
 }
