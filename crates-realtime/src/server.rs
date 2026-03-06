@@ -800,10 +800,20 @@ impl Realtime {
                             }
                             let g = m.game.as_mut().expect("game state initialized");
 
+                            // Protocol v2 is strict: don't allow card plays while waiting on
+                            // a truco/envido/flor answer.
+                            if g.public.hand_state != HandState::WaitingPlay {
+                                err = Some((
+                                    "BAD_STATE".into(),
+                                    "hand not accepting card plays".into(),
+                                ));
+                            }
+
                             // Protocol v2 is strict: the caller must be the current turn seat.
-                            if (g.public.turn_seat_idx as usize) != from_player_idx {
+                            if err.is_none() && (g.public.turn_seat_idx as usize) != from_player_idx
+                            {
                                 err = Some(("NOT_YOUR_TURN".into(), "not your turn".into()));
-                            } else {
+                            } else if err.is_none() {
                                 let teams_by_player_idx =
                                     m.players.iter().map(|p| p.team.as_u8()).collect::<Vec<_>>();
 
@@ -967,45 +977,84 @@ impl Realtime {
                         };
 
                         if err.is_none() {
-                            let teams_by_player_idx =
-                                m.players.iter().map(|p| p.team.as_u8()).collect::<Vec<_>>();
+                            // Protocol v2 is strict: the caller must be the current turn seat.
+                            if (g.public.turn_seat_idx as usize) != from_player_idx {
+                                err = Some(("NOT_YOUR_TURN".into(), "not your turn".into()));
+                            }
 
-                            let out =
-                                g.apply_command(command, from_player_idx, &teams_by_player_idx);
-                            if let CommandOutcome::HandEnded { winner_team_idx } = out {
-                                if winner_team_idx < 2 {
-                                    m.team_points[winner_team_idx as usize] =
-                                        m.team_points[winner_team_idx as usize].saturating_add(1);
+                            // Protocol v2 is strict: the command must be valid for the current
+                            // public hand state (and, for flor, based on the player's cards).
+                            if err.is_none() {
+                                let mut cards_for_calc: Vec<String> = Vec::new();
+                                let hand =
+                                    g.hands().get(from_player_idx).cloned().unwrap_or_default();
+                                let used = g
+                                    .used_hands()
+                                    .get(from_player_idx)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                cards_for_calc.extend(hand.iter().cloned());
+                                cards_for_calc.extend(used.iter().cloned());
+
+                                let allowed = g.possible_commands_for_cards(&cards_for_calc);
+                                if !allowed.contains(&command) {
+                                    err = Some((
+                                        "COMMAND_NOT_ALLOWED".into(),
+                                        "command not allowed".into(),
+                                    ));
                                 }
-                                let match_points = m.options.match_points.max(1);
-                                if winner_team_idx < 2
-                                    && m.team_points[winner_team_idx as usize] >= match_points
-                                {
-                                    m.phase = MatchPhase::Finished;
-                                    g.public.hand_state = HandState::Finished;
-                                    g.public.winner_team_idx = Some(winner_team_idx);
-                                } else {
-                                    // Match continues: broadcast the finished hand first, then
-                                    // start the next hand with a follow-up update.
-                                    g.public.hand_state = HandState::Finished;
-                                    g.public.winner_team_idx = Some(winner_team_idx);
+                            }
 
-                                    let players_len = m.players.len();
-                                    let next_forehand = if players_len == 0 {
-                                        0
+                            if err.is_none() {
+                                let teams_by_player_idx =
+                                    m.players.iter().map(|p| p.team.as_u8()).collect::<Vec<_>>();
+
+                                let now_ms = Self::now_ms();
+                                let out = g.apply_command(
+                                    command,
+                                    from_player_idx,
+                                    &teams_by_player_idx,
+                                    m.options.turn_time_ms,
+                                    now_ms,
+                                );
+
+                                if let CommandOutcome::HandEnded { winner_team_idx } = out {
+                                    if winner_team_idx < 2 {
+                                        m.team_points[winner_team_idx as usize] = m.team_points
+                                            [winner_team_idx as usize]
+                                            .saturating_add(1);
+                                    }
+
+                                    let match_points = m.options.match_points.max(1);
+                                    if winner_team_idx < 2
+                                        && m.team_points[winner_team_idx as usize] >= match_points
+                                    {
+                                        m.phase = MatchPhase::Finished;
+                                        g.public.hand_state = HandState::Finished;
+                                        g.public.winner_team_idx = Some(winner_team_idx);
                                     } else {
-                                        (g.public.forehand_seat_idx + 1) % (players_len as u8)
-                                    };
+                                        // Match continues: broadcast the finished hand first, then
+                                        // start the next hand with a follow-up update.
+                                        g.public.hand_state = HandState::Finished;
+                                        g.public.winner_team_idx = Some(winner_team_idx);
 
-                                    m.hand_no = m.hand_no.saturating_add(1);
-                                    m.pending_game =
-                                        Some(trucoshi_game::GameState::new_with_forehand(
-                                            players_len,
-                                            Self::seed_for_hand(&msid, m.hand_no),
-                                            m.options.turn_time_ms,
-                                            Self::now_ms(),
-                                            next_forehand,
-                                        ));
+                                        let players_len = m.players.len();
+                                        let next_forehand = if players_len == 0 {
+                                            0
+                                        } else {
+                                            (g.public.forehand_seat_idx + 1) % (players_len as u8)
+                                        };
+
+                                        m.hand_no = m.hand_no.saturating_add(1);
+                                        m.pending_game =
+                                            Some(trucoshi_game::GameState::new_with_forehand(
+                                                players_len,
+                                                Self::seed_for_hand(&msid, m.hand_no),
+                                                m.options.turn_time_ms,
+                                                Self::now_ms(),
+                                                next_forehand,
+                                            ));
+                                    }
                                 }
                             }
                         }

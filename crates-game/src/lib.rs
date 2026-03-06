@@ -79,6 +79,22 @@ pub enum CommandOutcome {
     HandEnded { winner_team_idx: u8 },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingCallKind {
+    Truco,
+    Envido,
+    Flor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingCall {
+    kind: PendingCallKind,
+    caller_idx: u8,
+
+    /// Turn seat to restore after the pending answer is resolved.
+    resume_turn_idx: u8,
+}
+
 /// Minimal, migration-friendly in-memory game state.
 #[derive(Debug, Clone)]
 pub struct GameState {
@@ -90,11 +106,48 @@ pub struct GameState {
     /// Epoch millis when the current turn times out.
     pub turn_expires_at_ms: i64,
 
+    /// Pending command call awaiting an answer (truco/envido/flor).
+    pending_call: Option<PendingCall>,
+
     /// Per-player hand (only revealed to the owning session via the `me` field on match events).
     hands: Vec<Vec<String>>,
 
     /// Per-player used cards.
     used_hands: Vec<Vec<String>>,
+}
+
+fn call_kind_for_command(cmd: GameCommand) -> Option<PendingCallKind> {
+    use GameCommand::*;
+
+    match cmd {
+        Truco | Retruco | ValeCuatro => Some(PendingCallKind::Truco),
+        Envido | RealEnvido | FaltaEnvido => Some(PendingCallKind::Envido),
+        Flor | ContraFlor | ContraFlorAlResto => Some(PendingCallKind::Flor),
+        _ => None,
+    }
+}
+
+fn next_opponent_idx(caller_idx: u8, teams_by_player_idx: &[u8]) -> u8 {
+    let players_len = teams_by_player_idx.len();
+    if players_len == 0 {
+        return 0;
+    }
+
+    let caller_team = teams_by_player_idx
+        .get(caller_idx as usize)
+        .copied()
+        .unwrap_or(0);
+
+    // Pick the next seat (clockwise) belonging to the opposing team.
+    for step in 1..=players_len {
+        let idx = ((caller_idx as usize) + step) % players_len;
+        if teams_by_player_idx.get(idx).copied().unwrap_or(caller_team) != caller_team {
+            return idx as u8;
+        }
+    }
+
+    // Fallback: next seat.
+    ((caller_idx as usize + 1) % players_len) as u8
 }
 
 impl GameState {
@@ -178,6 +231,7 @@ impl GameState {
             public,
             turn_idx: if players_len == 0 { 0 } else { forehand },
             turn_expires_at_ms: now_ms.saturating_add(turn_time_ms.max(0)),
+            pending_call: None,
             hands,
             used_hands,
         }
@@ -207,17 +261,65 @@ impl GameState {
         cmd: GameCommand,
         from_player_idx: usize,
         teams_by_player_idx: &[u8],
+        turn_time_ms: i64,
+        now_ms: i64,
     ) -> CommandOutcome {
         use HandState::*;
 
         let prev_state = self.public.hand_state.clone();
+        let prev_turn = self.turn_idx;
+
         self.apply_hand_state_hint(cmd);
+
+        // If this command begins a call/response exchange (truco/envido/flor), switch the turn
+        // to the opponent so the UI reflects who's expected to answer.
+        if prev_state == WaitingPlay {
+            if let Some(kind) = call_kind_for_command(cmd) {
+                if self.pending_call.is_none() {
+                    let caller_idx = u8::try_from(from_player_idx).unwrap_or(0);
+                    self.pending_call = Some(PendingCall {
+                        kind,
+                        caller_idx,
+                        resume_turn_idx: prev_turn,
+                    });
+
+                    let responder = next_opponent_idx(caller_idx, teams_by_player_idx);
+                    self.turn_idx = responder;
+                    self.public.turn_seat_idx = responder;
+                    self.turn_expires_at_ms = now_ms.saturating_add(turn_time_ms.max(0));
+                }
+            }
+        }
 
         match (prev_state, cmd) {
             // Declining truco ends the hand; award the hand to the *requesting* team.
-            // We don't yet track who requested, so we approximate that the requester is
-            // the opponent of the answering player.
             (WaitingForTrucoAnswer, GameCommand::NoQuiero) => {
+                let pending = self.pending_call.take();
+
+                // Restore turn to what it was before the call (best-effort).
+                if let Some(p) = pending {
+                    self.turn_idx = p.resume_turn_idx;
+                    self.public.turn_seat_idx = p.resume_turn_idx;
+                    self.turn_expires_at_ms = now_ms.saturating_add(turn_time_ms.max(0));
+
+                    // If we tracked a caller, award to their team.
+                    if p.kind == PendingCallKind::Truco {
+                        let winner = teams_by_player_idx
+                            .get(p.caller_idx as usize)
+                            .copied()
+                            .unwrap_or(0);
+                        let winner = if winner < 2 { winner } else { 0 };
+
+                        self.public.winner_team_idx = Some(winner);
+                        self.public.hand_state = Finished;
+                        return CommandOutcome::HandEnded {
+                            winner_team_idx: winner,
+                        };
+                    }
+                }
+
+                // Fallback: if we lost track of the caller, approximate that the requester is the
+                // opponent of the answering player.
                 let from_team = teams_by_player_idx.get(from_player_idx).copied();
                 if let Some(t) = from_team {
                     let winner = if t == 0 { 1 } else { 0 };
@@ -227,18 +329,24 @@ impl GameState {
                         winner_team_idx: winner,
                     };
                 }
+
                 CommandOutcome::None
             }
 
-            // Generic answers just resume play.
+            // Generic answers just resume play (and restore the pre-call turn seat).
             (
-                WaitingEnvidoAnswer | WaitingEnvidoPointsAnswer | WaitingFlorAnswer,
+                WaitingForTrucoAnswer
+                | WaitingEnvidoAnswer
+                | WaitingEnvidoPointsAnswer
+                | WaitingFlorAnswer,
                 GameCommand::Quiero | GameCommand::NoQuiero,
             ) => {
-                self.public.hand_state = WaitingPlay;
-                CommandOutcome::None
-            }
-            (WaitingForTrucoAnswer, GameCommand::Quiero) => {
+                if let Some(p) = self.pending_call.take() {
+                    self.turn_idx = p.resume_turn_idx;
+                    self.public.turn_seat_idx = p.resume_turn_idx;
+                    self.turn_expires_at_ms = now_ms.saturating_add(turn_time_ms.max(0));
+                }
+
                 self.public.hand_state = WaitingPlay;
                 CommandOutcome::None
             }
@@ -569,13 +677,35 @@ mod tests {
         let teams = vec![0u8, 1u8];
 
         // Someone says TRUCO, we enter the answer state.
-        g.apply_command(GameCommand::Truco, 0, &teams);
+        g.apply_command(GameCommand::Truco, 0, &teams, 10_000, now);
         assert_eq!(g.public.hand_state, HandState::WaitingForTrucoAnswer);
 
+        // Answer turn should move to the opponent.
+        assert_eq!(g.public.turn_seat_idx, 1);
+
         // Opponent declines.
-        let outcome = g.apply_command(GameCommand::NoQuiero, 1, &teams);
+        let outcome = g.apply_command(GameCommand::NoQuiero, 1, &teams, 10_000, now);
         assert_eq!(outcome, CommandOutcome::HandEnded { winner_team_idx: 0 });
         assert_eq!(g.public.winner_team_idx, Some(0));
         assert_eq!(g.public.hand_state, HandState::Finished);
+    }
+
+    #[test]
+    fn quiero_restores_turn_after_truco_answer() {
+        let now = 1000i64;
+        let mut g = GameState::new_with_forehand(2, 42, 10_000, now, 0);
+        let teams = vec![0u8, 1u8];
+
+        assert_eq!(g.public.turn_seat_idx, 0);
+
+        // Caller initiates.
+        g.apply_command(GameCommand::Truco, 0, &teams, 10_000, now);
+        assert_eq!(g.public.hand_state, HandState::WaitingForTrucoAnswer);
+        assert_eq!(g.public.turn_seat_idx, 1);
+
+        // Opponent accepts.
+        g.apply_command(GameCommand::Quiero, 1, &teams, 10_000, now);
+        assert_eq!(g.public.hand_state, HandState::WaitingPlay);
+        assert_eq!(g.public.turn_seat_idx, 0);
     }
 }
