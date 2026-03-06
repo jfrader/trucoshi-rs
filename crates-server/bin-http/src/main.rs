@@ -528,12 +528,31 @@ fn default_tournament_limit() -> i64 {
 
 async fn list_tournaments(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(q): Query<ListTournamentsQuery>,
 ) -> Result<Json<Vec<trucoshi_server::tournaments::types::Tournament>>, ApiError> {
     let repo = trucoshi_server::tournaments::repo::TournamentsRepo::new(state.store.pool.clone());
     let limit = q.limit.clamp(1, 200);
+
+    // Public endpoint, but if a bearer token is provided, use it to also show
+    // the caller's draft tournaments. If the token is present but invalid,
+    // return 401 (don't silently ignore auth errors).
+    let viewer_user_id =
+        if let Some(Authorization(bearer)) = headers.typed_get::<Authorization<Bearer>>() {
+            let data = trucoshi_auth::jwt::decode_access_jwt(&state.tokens, bearer.token())
+                .map_err(|_| ApiError::unauthorized("invalid token"))?;
+            let user_id: i64 = data
+                .claims
+                .sub
+                .parse()
+                .map_err(|_| ApiError::unauthorized("invalid sub"))?;
+            Some(user_id)
+        } else {
+            None
+        };
+
     let list = repo
-        .list_open_tournaments(limit)
+        .list_visible_tournaments(limit, viewer_user_id)
         .await
         .map_err(ApiError::internal)?;
     Ok(Json(list))

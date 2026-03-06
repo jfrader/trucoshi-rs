@@ -57,7 +57,15 @@ impl TournamentsRepo {
         })
     }
 
-    pub async fn list_open_tournaments(&self, limit: i64) -> anyhow::Result<Vec<Tournament>> {
+    /// List tournaments visible to a viewer.
+    ///
+    /// - Everyone can see `OPEN` tournaments.
+    /// - If `viewer_user_id` is present, they can also see their own `DRAFT` tournaments.
+    pub async fn list_visible_tournaments(
+        &self,
+        limit: i64,
+        viewer_user_id: Option<i64>,
+    ) -> anyhow::Result<Vec<Tournament>> {
         #[derive(sqlx::FromRow)]
         struct Row {
             id: i64,
@@ -74,12 +82,14 @@ impl TournamentsRepo {
             r#"
             SELECT id, name, status, owner_user_id, max_players, starts_at, created_at, updated_at
             FROM tournaments
-            WHERE status IN ('OPEN','DRAFT')
+            WHERE status = 'OPEN'
+               OR ($2 IS NOT NULL AND status = 'DRAFT' AND owner_user_id = $2)
             ORDER BY created_at DESC
             LIMIT $1
             "#,
         )
         .bind(limit)
+        .bind(viewer_user_id)
         .fetch_all(&self.pool)
         .await?;
 
