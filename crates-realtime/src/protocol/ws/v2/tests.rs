@@ -73,6 +73,34 @@ fn ws_protocol_is_strict_about_message_type_strings() {
 }
 
 #[test]
+fn ws_protocol_rejects_invalid_match_max_players() {
+    // Protocol v2: max_players must be one of 2/4/6.
+    let raw = r#"{
+        "v": 2,
+        "msg": {
+            "type": "match.create",
+            "data": {
+                "name": "x",
+                "options": {
+                    "max_players": 5,
+                    "flor": true,
+                    "match_points": 9,
+                    "turn_time_ms": 30000
+                }
+            }
+        }
+    }"#;
+
+    let err = serde_json::from_str::<WsInMessage>(raw).unwrap_err();
+    let s = err.to_string();
+    assert!(
+        s.contains("max_players")
+            && (s.contains("2, 4, 6") || s.contains("2") && s.contains("4") && s.contains("6")),
+        "unexpected error: {s}"
+    );
+}
+
+#[test]
 fn ws_out_message_allows_missing_id() {
     let raw = r#"{"v":2,"msg":{"type":"error","data":{"code":"X","message":"y"}}}"#;
     let msg = serde_json::from_str::<WsOutMessage>(raw).expect("should parse");
