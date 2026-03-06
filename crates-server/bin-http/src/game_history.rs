@@ -379,8 +379,15 @@ mod tests {
     #[derive(Debug, Clone, PartialEq)]
     enum Op {
         CreateMatch,
-        AddPlayer { seat_idx: i32 },
-        AppendEvent { seq: i64, ty: String },
+        AddPlayer {
+            seat_idx: i32,
+            user_id: Option<i64>,
+        },
+        AppendEvent {
+            seq: i64,
+            ty: String,
+            actor_user_id: Option<i64>,
+        },
         Finish,
     }
 
@@ -416,10 +423,13 @@ mod tests {
             _match_db_id: i64,
             seat_idx: i32,
             _team_idx: i32,
-            _user_id: Option<i64>,
+            user_id: Option<i64>,
             _display_name: &str,
         ) -> anyhow::Result<i64> {
-            self.ops.lock().await.push(Op::AddPlayer { seat_idx });
+            self.ops
+                .lock()
+                .await
+                .push(Op::AddPlayer { seat_idx, user_id });
             Ok(1)
         }
 
@@ -428,13 +438,14 @@ mod tests {
             _match_db_id: i64,
             seq: i64,
             _actor_seat_idx: Option<i32>,
-            _actor_user_id: Option<i64>,
+            actor_user_id: Option<i64>,
             r#type: &str,
             _data: serde_json::Value,
         ) -> anyhow::Result<i64> {
             self.ops.lock().await.push(Op::AppendEvent {
                 seq,
                 ty: r#type.to_string(),
+                actor_user_id,
             });
             Ok(1)
         }
@@ -515,41 +526,58 @@ mod tests {
 
         // Ensure seq increments and operations happened in the expected general shape.
         assert_eq!(ops[0], Op::CreateMatch);
-        assert_eq!(ops[1], Op::AddPlayer { seat_idx: 0 });
+        assert_eq!(
+            ops[1],
+            Op::AddPlayer {
+                seat_idx: 0,
+                user_id: None
+            }
+        );
         assert_eq!(
             ops[2],
             Op::AppendEvent {
                 seq: 0,
-                ty: "match.create".into()
+                ty: "match.create".into(),
+                actor_user_id: None,
             }
         );
-        assert_eq!(ops[3], Op::AddPlayer { seat_idx: 1 });
+        assert_eq!(
+            ops[3],
+            Op::AddPlayer {
+                seat_idx: 1,
+                user_id: None
+            }
+        );
         assert_eq!(
             ops[4],
             Op::AppendEvent {
                 seq: 1,
-                ty: "match.join".into()
+                ty: "match.join".into(),
+                actor_user_id: None,
             }
         );
         assert_eq!(
             ops[5],
             Op::AppendEvent {
                 seq: 2,
-                ty: "match.start".into()
+                ty: "match.start".into(),
+                actor_user_id: None,
             }
         );
         assert_eq!(
             ops[6],
             Op::AppendEvent {
                 seq: 3,
-                ty: "game.play_card".into()
+                ty: "game.play_card".into(),
+                actor_user_id: None,
             }
         );
         assert_eq!(
             ops[7],
             Op::AppendEvent {
                 seq: 4,
-                ty: "match.leave".into()
+                ty: "match.leave".into(),
+                actor_user_id: None,
             }
         );
         assert_eq!(ops[8], Op::Finish);
@@ -557,7 +585,95 @@ mod tests {
             ops[9],
             Op::AppendEvent {
                 seq: 5,
-                ty: "match.finish".into()
+                ty: "match.finish".into(),
+                actor_user_id: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_maps_registered_user_ids_to_fk() {
+        let backend = MockBackend::default();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let task = tokio::spawn(run_game_history_worker(backend.clone(), rx));
+
+        tx.send(GameHistoryEvent::MatchCreated {
+            match_id: "m1".into(),
+            server_version: "0.1.0".into(),
+            protocol_version: 2,
+            rng_seed: 123,
+            options: json!({ "ws_match_id": "m1" }),
+            owner: HistoryPlayer {
+                seat_idx: 0,
+                team_idx: 0,
+                user_id: 42,
+                display_name: "p1".into(),
+            },
+        })
+        .unwrap();
+
+        tx.send(GameHistoryEvent::PlayerJoined {
+            match_id: "m1".into(),
+            seat_idx: 1,
+            team_idx: 1,
+            user_id: 43,
+            display_name: "p2".into(),
+        })
+        .unwrap();
+
+        tx.send(GameHistoryEvent::GameAction {
+            match_id: "m1".into(),
+            actor_seat_idx: 0,
+            actor_team_idx: 0,
+            actor_user_id: 42,
+            ty: "match.ready".into(),
+            data: json!({ "ready": true }),
+        })
+        .unwrap();
+
+        drop(tx);
+        task.await.unwrap();
+
+        let ops = backend.take_ops().await;
+
+        assert_eq!(ops[0], Op::CreateMatch);
+        assert_eq!(
+            ops[1],
+            Op::AddPlayer {
+                seat_idx: 0,
+                user_id: Some(42)
+            }
+        );
+        assert_eq!(
+            ops[2],
+            Op::AppendEvent {
+                seq: 0,
+                ty: "match.create".into(),
+                actor_user_id: Some(42),
+            }
+        );
+        assert_eq!(
+            ops[3],
+            Op::AddPlayer {
+                seat_idx: 1,
+                user_id: Some(43)
+            }
+        );
+        assert_eq!(
+            ops[4],
+            Op::AppendEvent {
+                seq: 1,
+                ty: "match.join".into(),
+                actor_user_id: Some(43),
+            }
+        );
+        assert_eq!(
+            ops[5],
+            Op::AppendEvent {
+                seq: 2,
+                ty: "match.ready".into(),
+                actor_user_id: Some(42),
             }
         );
     }
