@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "gen:ws:schema": "cargo run -p trucoshi-realtime --features json-schema --bin ws_schema_v2 -- ./schemas/ws/v2",
+    "gen:ws:schema": "node scripts/gen-ws-schema.mjs -- ./schemas/ws/v2",
     "gen:ws:types": "node scripts/gen-ws-types.mjs",
     "gen:ws": "npm run gen:ws:schema && npm run gen:ws:types",
     "check:ws": "npm run gen:ws && git diff --exit-code -- schemas/ws/v2"
