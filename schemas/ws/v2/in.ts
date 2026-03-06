@@ -103,7 +103,7 @@ export interface WsInMessage {
   v: WsVersion;
 }
 export interface PingData {
-  clientTimeMs: number;
+  client_time_ms: number;
 }
 export interface MatchCreateData {
   /**
@@ -129,20 +129,20 @@ export interface MatchOptions {
   /**
    * Points required to win the match.
    */
-  matchPoints: number;
+  match_points: number;
   /**
    * Maximum number of players allowed in the match.
    *
    * Protocol v2: this is intentionally constrained to the UI-supported range.
    */
-  maxPlayers: number;
+  max_players: number;
   /**
    * Turn timer in milliseconds.
    */
-  turnTimeMs: number;
+  turn_time_ms: number;
 }
 export interface MatchJoinData {
-  matchId: string;
+  match_id: string;
   name: string;
   /**
    * Optional requested team (0 or 1). Server may override if full.
@@ -150,18 +150,18 @@ export interface MatchJoinData {
   team?: TeamIdx;
 }
 export interface MatchRefData {
-  matchId: string;
+  match_id: string;
 }
 export interface MatchReadyData {
-  matchId: string;
+  match_id: string;
   ready: boolean;
 }
 export interface ChatJoinData {
-  roomId: string;
+  room_id: string;
 }
 export interface ChatSayData {
   content: string;
-  roomId: string;
+  room_id: string;
 }
 export interface GamePlayCardData {
   /**
@@ -169,10 +169,10 @@ export interface GamePlayCardData {
    *
    * Message type: `game.play_card`
    */
-  cardIdx: number;
-  matchId: string;
+  card_idx: number;
+  match_id: string;
 }
 export interface GameSayData {
   command: GameCommand;
-  matchId: string;
+  match_id: string;
 }

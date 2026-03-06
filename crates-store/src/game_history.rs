@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde()]
 pub struct GameMatch {
     pub id: i64,
     pub created_at: OffsetDateTime,
@@ -20,7 +20,7 @@ pub struct GameMatch {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde()]
 pub struct GameMatchPlayer {
     pub id: i64,
     pub match_id: i64,
@@ -32,7 +32,7 @@ pub struct GameMatchPlayer {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde()]
 pub struct GameMatchEvent {
     pub id: i64,
     pub match_id: i64,

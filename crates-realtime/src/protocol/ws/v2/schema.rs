@@ -228,7 +228,7 @@ impl Default for MatchPhase {
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct MatchOptions {
     /// Maximum number of players allowed in the match.
     ///
@@ -269,7 +269,7 @@ impl Default for MatchOptions {
 /// generator edge-cases.
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct LobbyMatch {
     /// Match id (opaque).
     pub id: String,
@@ -289,7 +289,7 @@ pub struct LobbyMatch {
 /// This is the authoritative match state used by match-scoped events.
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct PublicMatch {
     /// Match id (opaque).
     pub id: String,
@@ -317,7 +317,7 @@ pub struct PublicMatch {
 /// Note: player keys are server-internal (session-bound) and are intentionally not exposed.
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct PublicPlayer {
     pub name: String,
 
@@ -329,7 +329,7 @@ pub struct PublicPlayer {
 /// Recipient-only private view of the current player.
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct PrivatePlayer {
     /// Seat index in the match's current `players` ordering.
     pub seat_idx: u8,
@@ -360,7 +360,7 @@ pub use trucoshi_game::{GameCommand, HandState, PlayedCard};
 /// This mirrors `trucoshi_game::PublicGameState` but uses `Maybe<T>` for optional fields.
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct PublicGameState {
     pub hand_state: HandState,
     pub forehand_seat_idx: u8,
@@ -406,7 +406,7 @@ impl From<&trucoshi_game::PublicGameState> for PublicGameState {
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct PublicChatUser {
     pub name: String,
 
@@ -420,7 +420,7 @@ pub struct PublicChatUser {
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct PublicChatMessage {
     pub id: String,
 
@@ -439,7 +439,7 @@ pub struct PublicChatMessage {
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct PublicChatRoom {
     pub id: String,
 

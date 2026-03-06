@@ -256,13 +256,13 @@
       "type": "object",
       "required": [
         "message",
-        "roomId"
+        "room_id"
       ],
       "properties": {
         "message": {
           "$ref": "#/definitions/PublicChatMessage"
         },
-        "roomId": {
+        "room_id": {
           "type": "string"
         }
       },
@@ -320,13 +320,13 @@
       "type": "object",
       "required": [
         "game",
-        "matchId"
+        "match_id"
       ],
       "properties": {
         "game": {
           "$ref": "#/definitions/PublicGameState"
         },
-        "matchId": {
+        "match_id": {
           "type": "string"
         }
       },
@@ -336,13 +336,13 @@
       "type": "object",
       "required": [
         "game",
-        "matchId"
+        "match_id"
       ],
       "properties": {
         "game": {
           "$ref": "#/definitions/PublicGameState"
         },
-        "matchId": {
+        "match_id": {
           "type": "string"
         }
       },
@@ -365,14 +365,14 @@
     "HelloData": {
       "type": "object",
       "required": [
-        "serverVersion",
-        "sessionId"
+        "server_version",
+        "session_id"
       ],
       "properties": {
-        "serverVersion": {
+        "server_version": {
           "type": "string"
         },
-        "sessionId": {
+        "session_id": {
           "type": "string"
         }
       },
@@ -384,7 +384,7 @@
       "required": [
         "id",
         "options",
-        "ownerSeatIdx",
+        "owner_seat_idx",
         "phase",
         "players"
       ],
@@ -396,7 +396,7 @@
         "options": {
           "$ref": "#/definitions/MatchOptions"
         },
-        "ownerSeatIdx": {
+        "owner_seat_idx": {
           "description": "Seat index (in `players[]`) of the current match owner.",
           "type": "integer",
           "format": "uint8",
@@ -418,10 +418,10 @@
     "LobbyMatchRemoveData": {
       "type": "object",
       "required": [
-        "matchId"
+        "match_id"
       ],
       "properties": {
-        "matchId": {
+        "match_id": {
           "description": "Match id (same value as `PublicMatch.id`).",
           "type": "string"
         }
@@ -459,10 +459,10 @@
       "description": "Confirmation that the client has left a match.\n\nThis exists so `match.leave` does not need any legacy-style \"ok\" quirks.",
       "type": "object",
       "required": [
-        "matchId"
+        "match_id"
       ],
       "properties": {
-        "matchId": {
+        "match_id": {
           "type": "string"
         }
       },
@@ -472,30 +472,30 @@
       "type": "object",
       "required": [
         "flor",
-        "matchPoints",
-        "maxPlayers",
-        "turnTimeMs"
+        "match_points",
+        "max_players",
+        "turn_time_ms"
       ],
       "properties": {
         "flor": {
           "description": "Whether Flor is enabled.",
           "type": "boolean"
         },
-        "matchPoints": {
+        "match_points": {
           "description": "Points required to win the match.",
           "type": "integer",
           "format": "uint8",
           "maximum": 15.0,
           "minimum": 1.0
         },
-        "maxPlayers": {
+        "max_players": {
           "description": "Maximum number of players allowed in the match.\n\nProtocol v2: this is intentionally constrained to the UI-supported range.",
           "type": "integer",
           "format": "uint8",
           "maximum": 6.0,
           "minimum": 2.0
         },
-        "turnTimeMs": {
+        "turn_time_ms": {
           "description": "Turn timer in milliseconds.",
           "type": "integer",
           "format": "int64",
@@ -548,13 +548,13 @@
       "type": "object",
       "required": [
         "card",
-        "seatIdx"
+        "seat_idx"
       ],
       "properties": {
         "card": {
           "type": "string"
         },
-        "seatIdx": {
+        "seat_idx": {
           "type": "integer",
           "format": "uint8",
           "minimum": 0.0
@@ -565,15 +565,15 @@
     "PongData": {
       "type": "object",
       "required": [
-        "clientTimeMs",
-        "serverTimeMs"
+        "client_time_ms",
+        "server_time_ms"
       ],
       "properties": {
-        "clientTimeMs": {
+        "client_time_ms": {
           "type": "integer",
           "format": "int64"
         },
-        "serverTimeMs": {
+        "server_time_ms": {
           "type": "integer",
           "format": "int64"
         }
@@ -585,10 +585,10 @@
       "type": "object",
       "required": [
         "commands",
-        "envidoPoints",
+        "envido_points",
         "hand",
-        "hasFlor",
-        "seatIdx",
+        "has_flor",
+        "seat_idx",
         "used"
       ],
       "properties": {
@@ -599,7 +599,7 @@
             "$ref": "#/definitions/GameCommand"
           }
         },
-        "envidoPoints": {
+        "envido_points": {
           "type": "integer",
           "format": "int32"
         },
@@ -609,10 +609,10 @@
             "type": "string"
           }
         },
-        "hasFlor": {
+        "has_flor": {
           "type": "boolean"
         },
-        "seatIdx": {
+        "seat_idx": {
           "description": "Seat index in the match's current `players` ordering.",
           "type": "integer",
           "format": "uint8",
@@ -631,7 +631,7 @@
       "type": "object",
       "required": [
         "content",
-        "dateMs",
+        "date_ms",
         "id",
         "system",
         "user"
@@ -640,7 +640,7 @@
         "content": {
           "type": "string"
         },
-        "dateMs": {
+        "date_ms": {
           "description": "Epoch millis.",
           "type": "integer",
           "format": "int64"
@@ -687,7 +687,7 @@
         "name": {
           "type": "string"
         },
-        "seatIdx": {
+        "seat_idx": {
           "description": "Optional match seat index, if the sender is currently in a match.",
           "allOf": [
             {
@@ -705,18 +705,18 @@
       "description": "Minimal public game state (protocol v2).\n\nThis mirrors `trucoshi_game::PublicGameState` but uses `Maybe<T>` for optional fields.",
       "type": "object",
       "required": [
-        "forehandSeatIdx",
-        "handState",
+        "forehand_seat_idx",
+        "hand_state",
         "rounds",
-        "turnSeatIdx"
+        "turn_seat_idx"
       ],
       "properties": {
-        "forehandSeatIdx": {
+        "forehand_seat_idx": {
           "type": "integer",
           "format": "uint8",
           "minimum": 0.0
         },
-        "handState": {
+        "hand_state": {
           "$ref": "#/definitions/HandState"
         },
         "rounds": {
@@ -729,12 +729,12 @@
             }
           }
         },
-        "turnSeatIdx": {
+        "turn_seat_idx": {
           "type": "integer",
           "format": "uint8",
           "minimum": 0.0
         },
-        "winnerTeamIdx": {
+        "winner_team_idx": {
           "description": "When set, the current hand is finished and the winner team is known.",
           "allOf": [
             {
@@ -751,10 +751,10 @@
       "required": [
         "id",
         "options",
-        "ownerSeatIdx",
+        "owner_seat_idx",
         "phase",
         "players",
-        "teamPoints"
+        "team_points"
       ],
       "properties": {
         "id": {
@@ -764,7 +764,7 @@
         "options": {
           "$ref": "#/definitions/MatchOptions"
         },
-        "ownerSeatIdx": {
+        "owner_seat_idx": {
           "description": "Seat index (in `players[]`) of the current match owner.",
           "type": "integer",
           "format": "uint8",
@@ -780,7 +780,7 @@
             "$ref": "#/definitions/PublicPlayer"
           }
         },
-        "teamPoints": {
+        "team_points": {
           "description": "Current match points for teams 0 and 1.",
           "type": "array",
           "items": {

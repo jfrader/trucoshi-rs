@@ -50,7 +50,7 @@ pub enum GameCommand {
 /// stable and avoid legacy-only convenience fields.
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct PublicGameState {
     pub hand_state: HandState,
     pub forehand_seat_idx: u8,
@@ -77,7 +77,7 @@ impl Default for PublicGameState {
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct PlayedCard {
     pub seat_idx: u8,
     pub card: String,

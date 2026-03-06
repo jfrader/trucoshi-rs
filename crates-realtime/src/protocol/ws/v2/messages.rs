@@ -13,14 +13,14 @@ use super::schema::{
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct PingData {
     pub client_time_ms: i64,
 }
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct MatchCreateData {
     /// Display name for the creating player.
     pub name: String,
@@ -38,7 +38,7 @@ pub struct MatchCreateData {
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct MatchJoinData {
     pub match_id: String,
     pub name: String,
@@ -50,7 +50,7 @@ pub struct MatchJoinData {
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct MatchReadyData {
     pub match_id: String,
     pub ready: bool,
@@ -58,21 +58,21 @@ pub struct MatchReadyData {
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct MatchRefData {
     pub match_id: String,
 }
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ChatJoinData {
     pub room_id: String,
 }
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ChatSayData {
     pub room_id: String,
     pub content: String,
@@ -80,7 +80,7 @@ pub struct ChatSayData {
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct GamePlayCardData {
     pub match_id: String,
 
@@ -92,7 +92,7 @@ pub struct GamePlayCardData {
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct GameSayData {
     pub match_id: String,
     pub command: GameCommand,
@@ -102,7 +102,7 @@ pub struct GameSayData {
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct PongData {
     pub server_time_ms: i64,
     pub client_time_ms: i64,
@@ -110,7 +110,7 @@ pub struct PongData {
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct HelloData {
     pub session_id: String,
     pub server_version: String,
@@ -118,21 +118,21 @@ pub struct HelloData {
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct LobbySnapshotData {
     pub matches: Vec<LobbyMatch>,
 }
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct LobbyMatchUpsertData {
     pub r#match: LobbyMatch,
 }
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct LobbyMatchRemoveData {
     /// Match id (same value as `PublicMatch.id`).
     pub match_id: String,
@@ -140,7 +140,7 @@ pub struct LobbyMatchRemoveData {
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct MatchSnapshotData {
     pub r#match: PublicMatch,
 
@@ -150,7 +150,7 @@ pub struct MatchSnapshotData {
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct MatchUpdateData {
     pub r#match: PublicMatch,
 
@@ -163,14 +163,14 @@ pub struct MatchUpdateData {
 /// This exists so `match.leave` does not need any legacy-style "ok" quirks.
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct MatchLeftData {
     pub match_id: String,
 }
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct GameSnapshotData {
     pub match_id: String,
     pub game: PublicGameState,
@@ -178,7 +178,7 @@ pub struct GameSnapshotData {
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct GameUpdateData {
     pub match_id: String,
     pub game: PublicGameState,
@@ -186,14 +186,14 @@ pub struct GameUpdateData {
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ChatSnapshotData {
     pub room: PublicChatRoom,
 }
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ChatMessageData {
     pub room_id: String,
     pub message: PublicChatMessage,

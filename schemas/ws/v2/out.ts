@@ -110,12 +110,12 @@ export interface WsOutMessage {
   v: WsVersion;
 }
 export interface PongData {
-  clientTimeMs: number;
-  serverTimeMs: number;
+  client_time_ms: number;
+  server_time_ms: number;
 }
 export interface HelloData {
-  serverVersion: string;
-  sessionId: string;
+  server_version: string;
+  session_id: string;
 }
 export interface LobbySnapshotData {
   matches: LobbyMatch[];
@@ -136,7 +136,7 @@ export interface LobbyMatch {
   /**
    * Seat index (in `players[]`) of the current match owner.
    */
-  ownerSeatIdx: number;
+  owner_seat_idx: number;
   phase: MatchPhase;
   /**
    * Players ordered by seating/turn order (server-defined).
@@ -151,17 +151,17 @@ export interface MatchOptions {
   /**
    * Points required to win the match.
    */
-  matchPoints: number;
+  match_points: number;
   /**
    * Maximum number of players allowed in the match.
    *
    * Protocol v2: this is intentionally constrained to the UI-supported range.
    */
-  maxPlayers: number;
+  max_players: number;
   /**
    * Turn timer in milliseconds.
    */
-  turnTimeMs: number;
+  turn_time_ms: number;
 }
 /**
  * Public player view (protocol v2).
@@ -182,7 +182,7 @@ export interface LobbyMatchRemoveData {
   /**
    * Match id (same value as `PublicMatch.id`).
    */
-  matchId: string;
+  match_id: string;
 }
 export interface MatchSnapshotData {
   match: PublicMatch;
@@ -202,7 +202,7 @@ export interface PublicMatch {
   /**
    * Seat index (in `players[]`) of the current match owner.
    */
-  ownerSeatIdx: number;
+  owner_seat_idx: number;
   phase: MatchPhase;
   /**
    * Players ordered by seating/turn order (server-defined).
@@ -214,7 +214,7 @@ export interface PublicMatch {
    * @minItems 2
    * @maxItems 2
    */
-  teamPoints: [number, number];
+  team_points: [number, number];
 }
 /**
  * Recipient-only private view of the current player.
@@ -226,13 +226,13 @@ export interface PrivatePlayer {
    * Protocol v2 is intentionally strict: this is a typed enum instead of free-form strings.
    */
   commands: GameCommand[];
-  envidoPoints: number;
+  envido_points: number;
   hand: string[];
-  hasFlor: boolean;
+  has_flor: boolean;
   /**
    * Seat index in the match's current `players` ordering.
    */
-  seatIdx: number;
+  seat_idx: number;
   used: string[];
 }
 export interface MatchUpdateData {
@@ -245,11 +245,11 @@ export interface MatchUpdateData {
  * This exists so `match.leave` does not need any legacy-style "ok" quirks.
  */
 export interface MatchLeftData {
-  matchId: string;
+  match_id: string;
 }
 export interface GameSnapshotData {
   game: PublicGameState;
-  matchId: string;
+  match_id: string;
 }
 /**
  * Minimal public game state (protocol v2).
@@ -257,25 +257,25 @@ export interface GameSnapshotData {
  * This mirrors `trucoshi_game::PublicGameState` but uses `Maybe<T>` for optional fields.
  */
 export interface PublicGameState {
-  forehandSeatIdx: number;
-  handState: HandState;
+  forehand_seat_idx: number;
+  hand_state: HandState;
   /**
    * Played cards grouped by round/trick.
    */
   rounds: PlayedCard[][];
-  turnSeatIdx: number;
+  turn_seat_idx: number;
   /**
    * When set, the current hand is finished and the winner team is known.
    */
-  winnerTeamIdx?: TeamIdx;
+  winner_team_idx?: TeamIdx;
 }
 export interface PlayedCard {
   card: string;
-  seatIdx: number;
+  seat_idx: number;
 }
 export interface GameUpdateData {
   game: PublicGameState;
-  matchId: string;
+  match_id: string;
 }
 export interface ChatSnapshotData {
   room: PublicChatRoom;
@@ -292,7 +292,7 @@ export interface PublicChatMessage {
   /**
    * Epoch millis.
    */
-  dateMs: number;
+  date_ms: number;
   id: string;
   /**
    * Whether the message is system-generated.
@@ -307,12 +307,12 @@ export interface PublicChatUser {
   /**
    * Optional match seat index, if the sender is currently in a match.
    */
-  seatIdx?: Uint8;
+  seat_idx?: Uint8;
   team?: TeamIdx;
 }
 export interface ChatMessageData {
   message: PublicChatMessage;
-  roomId: string;
+  room_id: string;
 }
 export interface ErrorPayload {
   /**

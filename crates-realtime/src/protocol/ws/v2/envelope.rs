@@ -92,11 +92,11 @@ impl TryFrom<u16> for WsVersion {
 ///
 /// All message `type` strings use dot-separated namespaces and `snake_case`.
 ///
-/// Field names within each message use `camelCase` (via serde's `rename_all`).
+/// Field names within each message use Rust's field names (snake_case).
 /// ```
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct WsInMessage {
     /// Protocol version (must be exactly 2).
     pub v: WsVersion,
@@ -114,7 +114,7 @@ pub struct WsInMessage {
 /// WebSocket outbound frame (server -> client).
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct WsOutMessage {
     /// Protocol version (must be exactly 2).
     pub v: WsVersion,

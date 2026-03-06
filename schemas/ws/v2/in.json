@@ -328,10 +328,10 @@
     "ChatJoinData": {
       "type": "object",
       "required": [
-        "roomId"
+        "room_id"
       ],
       "properties": {
-        "roomId": {
+        "room_id": {
           "type": "string"
         }
       },
@@ -341,13 +341,13 @@
       "type": "object",
       "required": [
         "content",
-        "roomId"
+        "room_id"
       ],
       "properties": {
         "content": {
           "type": "string"
         },
-        "roomId": {
+        "room_id": {
           "type": "string"
         }
       },
@@ -374,17 +374,17 @@
     "GamePlayCardData": {
       "type": "object",
       "required": [
-        "cardIdx",
-        "matchId"
+        "card_idx",
+        "match_id"
       ],
       "properties": {
-        "cardIdx": {
+        "card_idx": {
           "description": "`cardIdx` references the caller's current hand ordering.\n\nMessage type: `game.play_card`",
           "type": "integer",
           "format": "uint8",
           "minimum": 0.0
         },
-        "matchId": {
+        "match_id": {
           "type": "string"
         }
       },
@@ -394,13 +394,13 @@
       "type": "object",
       "required": [
         "command",
-        "matchId"
+        "match_id"
       ],
       "properties": {
         "command": {
           "$ref": "#/definitions/GameCommand"
         },
-        "matchId": {
+        "match_id": {
           "type": "string"
         }
       },
@@ -438,11 +438,11 @@
     "MatchJoinData": {
       "type": "object",
       "required": [
-        "matchId",
+        "match_id",
         "name"
       ],
       "properties": {
-        "matchId": {
+        "match_id": {
           "type": "string"
         },
         "name": {
@@ -463,30 +463,30 @@
       "type": "object",
       "required": [
         "flor",
-        "matchPoints",
-        "maxPlayers",
-        "turnTimeMs"
+        "match_points",
+        "max_players",
+        "turn_time_ms"
       ],
       "properties": {
         "flor": {
           "description": "Whether Flor is enabled.",
           "type": "boolean"
         },
-        "matchPoints": {
+        "match_points": {
           "description": "Points required to win the match.",
           "type": "integer",
           "format": "uint8",
           "maximum": 15.0,
           "minimum": 1.0
         },
-        "maxPlayers": {
+        "max_players": {
           "description": "Maximum number of players allowed in the match.\n\nProtocol v2: this is intentionally constrained to the UI-supported range.",
           "type": "integer",
           "format": "uint8",
           "maximum": 6.0,
           "minimum": 2.0
         },
-        "turnTimeMs": {
+        "turn_time_ms": {
           "description": "Turn timer in milliseconds.",
           "type": "integer",
           "format": "int64",
@@ -499,11 +499,11 @@
     "MatchReadyData": {
       "type": "object",
       "required": [
-        "matchId",
+        "match_id",
         "ready"
       ],
       "properties": {
-        "matchId": {
+        "match_id": {
           "type": "string"
         },
         "ready": {
@@ -515,10 +515,10 @@
     "MatchRefData": {
       "type": "object",
       "required": [
-        "matchId"
+        "match_id"
       ],
       "properties": {
-        "matchId": {
+        "match_id": {
           "type": "string"
         }
       },
@@ -527,10 +527,10 @@
     "PingData": {
       "type": "object",
       "required": [
-        "clientTimeMs"
+        "client_time_ms"
       ],
       "properties": {
-        "clientTimeMs": {
+        "client_time_ms": {
           "type": "integer",
           "format": "int64"
         }

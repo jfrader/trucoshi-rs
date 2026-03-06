@@ -24,7 +24,7 @@ impl TournamentStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde()]
 pub struct Tournament {
     pub id: i64,
     pub name: String,
@@ -37,7 +37,7 @@ pub struct Tournament {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde()]
 pub struct TournamentEntry {
     pub id: i64,
     pub tournament_id: i64,
