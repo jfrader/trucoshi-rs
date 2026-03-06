@@ -165,25 +165,42 @@ fn next_opponent_idx(caller_idx: u8, teams_by_player_idx: &[u8]) -> u8 {
 }
 
 impl GameState {
-    /// Best-effort list of commands the current player can say, based on the public hand state.
+    /// Best-effort list of commands the given player can say, based on the public hand state.
     ///
-    /// Note: this still does not enforce full Truco rules, but protocol v2 is strict about the
-    /// wire format: we return typed `GameCommand` values rather than free-form strings.
-    pub fn possible_commands_for_cards(&self, cards: &[String]) -> Vec<GameCommand> {
+    /// Protocol v2 expects *strict* enums on the wire (no free-form strings). We also enforce
+    /// a couple of key Truco constraints here to improve gameplay fidelity:
+    /// - Envido/Flor family can only be called before any card is played in the hand.
+    /// - Truco escalation is gated by the currently accepted value.
+    pub fn possible_commands_for_player(&self, player_idx: usize) -> Vec<GameCommand> {
         use HandState::*;
 
-        let hs = self.public.hand_state.clone();
+        let hs = self.public.hand_state;
 
-        let has_flor = has_flor(cards);
+        let hand = self.hands.get(player_idx).cloned().unwrap_or_default();
+        let has_flor = has_flor(&hand);
 
-        let cmds: Vec<GameCommand> = match hs {
+        let any_card_played = self.used_hands.iter().any(|u| !u.is_empty());
+
+        match hs {
             WaitingPlay => {
-                let mut v = vec![
-                    // Envido
-                    GameCommand::Envido,
-                    GameCommand::RealEnvido,
-                    GameCommand::FaltaEnvido,
-                ];
+                let mut v = Vec::<GameCommand>::new();
+
+                // Envido/Flor are only valid before the first card is played.
+                if !any_card_played {
+                    v.extend([
+                        GameCommand::Envido,
+                        GameCommand::RealEnvido,
+                        GameCommand::FaltaEnvido,
+                    ]);
+
+                    if has_flor {
+                        v.extend([
+                            GameCommand::Flor,
+                            GameCommand::ContraFlor,
+                            GameCommand::ContraFlorAlResto,
+                        ]);
+                    }
+                }
 
                 // Truco escalation depends on the current accepted value.
                 // Start at 1 (no truco). Each accepted escalation increments up to 4.
@@ -194,15 +211,6 @@ impl GameState {
                     _ => {}
                 }
 
-                // Flor (only if player has it).
-                if has_flor {
-                    v.extend([
-                        GameCommand::Flor,
-                        GameCommand::ContraFlor,
-                        GameCommand::ContraFlorAlResto,
-                    ]);
-                }
-
                 v
             }
             WaitingForTrucoAnswer | WaitingEnvidoAnswer | WaitingFlorAnswer => {
@@ -210,9 +218,7 @@ impl GameState {
             }
             WaitingEnvidoPointsAnswer => vec![GameCommand::SonBuenas],
             DisplayFlorBattle | DisplayPreviousHand | Finished => vec![],
-        };
-
-        cmds
+        }
     }
 
     pub fn new(players_len: usize, seed: u64, turn_time_ms: i64, now_ms: i64) -> Self {
@@ -309,7 +315,7 @@ impl GameState {
                     };
 
                     // Reject invalid Truco escalations defensively (even if callers should
-                    // already be using `possible_commands_for_cards`).
+                    // already be using `possible_commands_for_player`).
                     if kind == PendingCallKind::Truco && truco_target_value == 0 {
                         // No state change.
                     } else {
@@ -839,5 +845,20 @@ mod tests {
         g.apply_command(GameCommand::Quiero, 1, &teams, 10_000, now);
         assert_eq!(g.public.hand_state, HandState::WaitingPlay);
         assert_eq!(g.public.turn_seat_idx, 0);
+    }
+
+    #[test]
+    fn envido_is_only_allowed_before_any_card_is_played() {
+        let now = 1000i64;
+        let mut g = GameState::new_with_forehand(2, 42, 10_000, now, 0);
+        let teams = vec![0u8, 1u8];
+
+        let cmds = g.possible_commands_for_player(0);
+        assert!(cmds.contains(&GameCommand::Envido));
+
+        // After the first card is played, envido must no longer be offered.
+        let _ = g.play_card(0, &teams, 10_000, now);
+        let cmds = g.possible_commands_for_player(1);
+        assert!(!cmds.contains(&GameCommand::Envido));
     }
 }

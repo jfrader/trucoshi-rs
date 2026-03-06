@@ -986,20 +986,9 @@ impl Realtime {
                             }
 
                             // Protocol v2 is strict: the command must be valid for the current
-                            // public hand state (and, for flor, based on the player's cards).
+                            // public hand state.
                             if err.is_none() {
-                                let mut cards_for_calc: Vec<String> = Vec::new();
-                                let hand =
-                                    g.hands().get(from_player_idx).cloned().unwrap_or_default();
-                                let used = g
-                                    .used_hands()
-                                    .get(from_player_idx)
-                                    .cloned()
-                                    .unwrap_or_default();
-                                cards_for_calc.extend(hand.iter().cloned());
-                                cards_for_calc.extend(used.iter().cloned());
-
-                                let allowed = g.possible_commands_for_cards(&cards_for_calc);
+                                let allowed = g.possible_commands_for_player(from_player_idx);
                                 if !allowed.contains(&command) {
                                     err = Some((
                                         "COMMAND_NOT_ALLOWED".into(),
@@ -1273,7 +1262,7 @@ impl Realtime {
         cards_for_calc.extend(used.iter().cloned());
 
         let commands = if (g.public.turn_seat_idx as usize) == idx {
-            g.possible_commands_for_cards(&cards_for_calc)
+            g.possible_commands_for_player(idx)
         } else {
             vec![]
         };
