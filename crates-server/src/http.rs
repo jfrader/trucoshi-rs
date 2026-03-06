@@ -193,13 +193,13 @@ struct UserDto {
     id: i64,
     email: Option<String>,
     name: String,
-    avatarUrl: Option<String>,
-    twitter: Option<String>,
+    avatar_url: Option<String>,
+    twitter_handle: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct AuthResponse {
-    accessToken: String,
+    access_token: String,
     user: UserDto,
 }
 
@@ -320,8 +320,8 @@ async fn me(
         id: rec.id,
         email: rec.email,
         name: rec.name,
-        avatarUrl: rec.avatar_url,
-        twitter: rec.twitter_handle,
+        avatar_url: rec.avatar_url,
+        twitter_handle: rec.twitter_handle,
     }))
 }
 
@@ -435,13 +435,13 @@ async fn issue_tokens_and_cookie(
     .map_err(ApiError::internal)?;
 
     let body = AuthResponse {
-        accessToken: access,
+        access_token: access,
         user: UserDto {
             id: rec.id,
             email: rec.email,
             name: rec.name,
-            avatarUrl: rec.avatar_url,
-            twitter: rec.twitter_handle,
+            avatar_url: rec.avatar_url,
+            twitter_handle: rec.twitter_handle,
         },
     };
 
