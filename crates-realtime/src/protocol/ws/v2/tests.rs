@@ -42,6 +42,37 @@ fn ws_out_message_rejects_wrong_version() {
 }
 
 #[test]
+fn ws_protocol_is_strict_about_snake_case_fields() {
+    // Ensure we do NOT accept camelCase aliases, even if the correct snake_case field exists.
+    let raw_in = r#"{"v":2,"msg":{"type":"ping","data":{"client_time_ms":1,"clientTimeMs":1}}}"#;
+    let err = serde_json::from_str::<WsInMessage>(raw_in).unwrap_err();
+    let s = err.to_string();
+    assert!(
+        s.contains("unknown field") && s.contains("clientTimeMs"),
+        "unexpected error: {s}"
+    );
+
+    let raw_out = r#"{"v":2,"msg":{"type":"hello","data":{"session_id":"s","server_version":"x","sessionId":"s"}}}"#;
+    let err = serde_json::from_str::<WsOutMessage>(raw_out).unwrap_err();
+    let s = err.to_string();
+    assert!(
+        s.contains("unknown field") && s.contains("sessionId"),
+        "unexpected error: {s}"
+    );
+}
+
+#[test]
+fn ws_protocol_is_strict_about_message_type_strings() {
+    let raw = r#"{"v":2,"msg":{"type":"matchJoin","data":{"match_id":"m","name":"n"}}}"#;
+    let err = serde_json::from_str::<WsInMessage>(raw).unwrap_err();
+    let s = err.to_string();
+    assert!(
+        s.contains("unknown") || s.contains("variant"),
+        "unexpected error: {s}"
+    );
+}
+
+#[test]
 fn ws_out_message_allows_missing_id() {
     let raw = r#"{"v":2,"msg":{"type":"error","data":{"code":"X","message":"y"}}}"#;
     let msg = serde_json::from_str::<WsOutMessage>(raw).expect("should parse");
