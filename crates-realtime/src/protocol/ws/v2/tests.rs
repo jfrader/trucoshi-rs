@@ -180,3 +180,253 @@ fn ws_v2_schema_files_are_up_to_date() {
     assert_schema_file_up_to_date("c2s.json", c2s_message_schema());
     assert_schema_file_up_to_date("s2c.json", s2c_message_schema());
 }
+
+fn is_snake_case_segment(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+
+    // `snake_case` segment means:
+    // - lowercase letters, digits, and underscores only
+    // - no leading/trailing underscores
+    // - no consecutive underscores
+    let bytes = s.as_bytes();
+    if bytes.first() == Some(&b'_') || bytes.last() == Some(&b'_') {
+        return false;
+    }
+
+    let mut prev_underscore = false;
+    for &b in bytes {
+        let ok = (b'a'..=b'z').contains(&b) || (b'0'..=b'9').contains(&b) || b == b'_';
+        if !ok {
+            return false;
+        }
+        if b == b'_' {
+            if prev_underscore {
+                return false;
+            }
+            prev_underscore = true;
+        } else {
+            prev_underscore = false;
+        }
+    }
+
+    true
+}
+
+fn is_ws_type_string(s: &str) -> bool {
+    let mut parts = s.split('.');
+    let first = parts.next();
+    let Some(first) = first else {
+        return false;
+    };
+    if !is_snake_case_segment(first) {
+        return false;
+    }
+    for p in parts {
+        if !is_snake_case_segment(p) {
+            return false;
+        }
+    }
+    true
+}
+
+#[test]
+fn ws_protocol_message_type_strings_are_snake_case_dot_namespaces() {
+    use super::schema::{
+        HandState, LobbyMatch, MatchOptions, MatchPhase, Maybe, PlayedCard, PublicChatMessage,
+        PublicChatRoom, PublicChatUser, PublicGameState, PublicMatch, PublicPlayer, TeamIdx,
+    };
+    use super::{
+        ChatJoinData, ChatMessageData, ChatSayData, ChatSnapshotData, ErrorPayload,
+        GamePlayCardData, GameSayData, GameSnapshotData, GameUpdateData, HelloData,
+        LobbyMatchRemoveData, LobbyMatchUpsertData, LobbySnapshotData, MatchCreateData,
+        MatchJoinData, MatchLeftData, MatchReadyData, MatchRefData, MatchSnapshotData,
+        MatchUpdateData, PingData, PongData,
+    };
+
+    fn type_of<T: serde::Serialize>(msg: T) -> String {
+        let v = serde_json::to_value(msg).expect("serialize msg");
+        v.get("type")
+            .and_then(|v| v.as_str())
+            .expect("message must have a type tag")
+            .to_string()
+    }
+
+    let lobby_match = LobbyMatch {
+        id: "m".into(),
+        options: MatchOptions::default(),
+        phase: MatchPhase::Lobby,
+        players: vec![PublicPlayer {
+            name: "p".into(),
+            team: TeamIdx::TEAM_0,
+            ready: false,
+        }],
+        owner_seat_idx: 0,
+    };
+
+    let public_match = PublicMatch {
+        id: "m".into(),
+        options: MatchOptions::default(),
+        phase: MatchPhase::Lobby,
+        players: vec![PublicPlayer {
+            name: "p".into(),
+            team: TeamIdx::TEAM_0,
+            ready: false,
+        }],
+        owner_seat_idx: 0,
+        team_points: [0, 0],
+    };
+
+    let public_game = PublicGameState {
+        hand_state: HandState::WaitingPlay,
+        forehand_seat_idx: 0,
+        turn_seat_idx: 0,
+        rounds: vec![vec![PlayedCard {
+            seat_idx: 0,
+            card: "1e".into(),
+        }]],
+        winner_team_idx: Maybe(None),
+    };
+
+    let chat_user = PublicChatUser {
+        name: "u".into(),
+        seat_idx: Maybe(None),
+        team: Maybe(None),
+    };
+
+    let chat_msg = PublicChatMessage {
+        id: "x".into(),
+        date_ms: 0,
+        user: chat_user,
+        system: false,
+        content: "hi".into(),
+    };
+
+    let c2s_types = vec![
+        type_of(C2sMessage::Ping(PingData { client_time_ms: 0 })),
+        type_of(C2sMessage::LobbySnapshotGet),
+        type_of(C2sMessage::MatchCreate(MatchCreateData {
+            name: "n".into(),
+            team: Default::default(),
+            options: Default::default(),
+        })),
+        type_of(C2sMessage::MatchJoin(MatchJoinData {
+            match_id: "m".into(),
+            name: "n".into(),
+            team: Default::default(),
+        })),
+        type_of(C2sMessage::MatchLeave(MatchRefData {
+            match_id: "m".into(),
+        })),
+        type_of(C2sMessage::MatchReady(MatchReadyData {
+            match_id: "m".into(),
+            ready: true,
+        })),
+        type_of(C2sMessage::MatchSnapshotGet(MatchRefData {
+            match_id: "m".into(),
+        })),
+        type_of(C2sMessage::GameSnapshotGet(MatchRefData {
+            match_id: "m".into(),
+        })),
+        type_of(C2sMessage::MatchStart(MatchRefData {
+            match_id: "m".into(),
+        })),
+        type_of(C2sMessage::MatchPause(MatchRefData {
+            match_id: "m".into(),
+        })),
+        type_of(C2sMessage::MatchResume(MatchRefData {
+            match_id: "m".into(),
+        })),
+        type_of(C2sMessage::ChatJoin(ChatJoinData {
+            room_id: "r".into(),
+        })),
+        type_of(C2sMessage::ChatSay(ChatSayData {
+            room_id: "r".into(),
+            content: "c".into(),
+        })),
+        type_of(C2sMessage::GamePlayCard(GamePlayCardData {
+            match_id: "m".into(),
+            card_idx: 0,
+        })),
+        type_of(C2sMessage::GameSay(GameSayData {
+            match_id: "m".into(),
+            command: super::schema::GameCommand::Truco,
+        })),
+    ];
+
+    let s2c_types = vec![
+        type_of(S2cMessage::Pong(PongData {
+            server_time_ms: 0,
+            client_time_ms: 0,
+        })),
+        type_of(S2cMessage::Hello(HelloData {
+            session_id: "s".into(),
+            server_version: "v".into(),
+        })),
+        type_of(S2cMessage::LobbySnapshot(LobbySnapshotData {
+            matches: vec![lobby_match.clone()],
+        })),
+        type_of(S2cMessage::LobbyMatchUpsert(LobbyMatchUpsertData {
+            match_: lobby_match,
+        })),
+        type_of(S2cMessage::LobbyMatchRemove(LobbyMatchRemoveData {
+            match_id: "m".into(),
+        })),
+        type_of(S2cMessage::MatchSnapshot(MatchSnapshotData {
+            match_: public_match.clone(),
+            me: Default::default(),
+        })),
+        type_of(S2cMessage::MatchUpdate(MatchUpdateData {
+            match_: public_match,
+            me: Default::default(),
+        })),
+        type_of(S2cMessage::MatchLeft(MatchLeftData {
+            match_id: "m".into(),
+        })),
+        type_of(S2cMessage::GameSnapshot(GameSnapshotData {
+            match_id: "m".into(),
+            game: public_game.clone(),
+        })),
+        type_of(S2cMessage::GameUpdate(GameUpdateData {
+            match_id: "m".into(),
+            game: public_game,
+        })),
+        type_of(S2cMessage::ChatSnapshot(ChatSnapshotData {
+            room: PublicChatRoom {
+                id: "r".into(),
+                messages: vec![chat_msg.clone()],
+            },
+        })),
+        type_of(S2cMessage::ChatMessage(ChatMessageData {
+            room_id: "r".into(),
+            message: chat_msg,
+        })),
+        type_of(S2cMessage::Error(ErrorPayload {
+            code: "X".into(),
+            message: "Y".into(),
+        })),
+    ];
+
+    for t in c2s_types.iter().chain(s2c_types.iter()) {
+        assert!(
+            is_ws_type_string(t),
+            "ws message type must be dot-separated snake_case: {t}"
+        );
+    }
+
+    // Also ensure there are no accidental duplicates within each direction.
+    let uniq_c2s: std::collections::HashSet<_> = c2s_types.iter().collect();
+    assert_eq!(
+        uniq_c2s.len(),
+        c2s_types.len(),
+        "duplicate client->server ws message type strings"
+    );
+
+    let uniq_s2c: std::collections::HashSet<_> = s2c_types.iter().collect();
+    assert_eq!(
+        uniq_s2c.len(),
+        s2c_types.len(),
+        "duplicate server->client ws message type strings"
+    );
+}
