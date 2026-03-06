@@ -131,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
             "/v1/tournaments",
             get(list_tournaments).post(create_tournament),
         )
-        .route("/v1/tournaments/:id/entries", post(join_tournament))
+        .route("/v1/tournaments/{id}/entries", post(join_tournament))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state);

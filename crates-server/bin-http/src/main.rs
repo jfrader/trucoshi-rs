@@ -899,3 +899,32 @@ impl IntoResponse for ApiError {
             .into_response()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use axum::{Router, body::Body, http::Request, routing::get};
+    use tower::util::ServiceExt;
+
+    #[tokio::test]
+    async fn axum_route_params_match_brace_syntax() {
+        async fn ok() -> StatusCode {
+            StatusCode::OK
+        }
+
+        let app = Router::new().route("/t/{id}", get(ok));
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/t/123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+}
