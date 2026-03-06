@@ -116,9 +116,9 @@ export interface MatchOptions {
   /**
    * Maximum number of players allowed in the match.
    *
-   * Protocol v2: this is intentionally constrained to the UI-supported range.
+   * Protocol v2: enforced as an explicit enum (2/4/6), since Truco is always two teams with equal sizes.
    */
-  max_players: number;
+  max_players: 2 | 4 | 6;
   /**
    * Turn timer in milliseconds.
    */

@@ -489,11 +489,14 @@
           "minimum": 1.0
         },
         "max_players": {
-          "description": "Maximum number of players allowed in the match.\n\nProtocol v2: this is intentionally constrained to the UI-supported range.",
+          "description": "Maximum number of players allowed in the match.\n\nProtocol v2: enforced as an explicit enum (2/4/6), since Truco is always two teams with equal sizes.",
           "type": "integer",
           "format": "uint8",
-          "maximum": 6.0,
-          "minimum": 2.0
+          "enum": [
+            2,
+            4,
+            6
+          ]
         },
         "turn_time_ms": {
           "description": "Turn timer in milliseconds.",

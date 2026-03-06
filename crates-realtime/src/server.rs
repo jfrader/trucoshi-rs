@@ -527,25 +527,49 @@ impl Realtime {
 
                     if m.owner_key != pkey {
                         err = Some(("NOT_OWNER".into(), "only the owner can start".into()));
-                    } else if !m.players.iter().all(|p| p.ready) {
-                        err = Some(("NOT_READY".into(), "all players must be ready".into()));
+                    } else if m.phase != MatchPhase::Lobby {
+                        err = Some(("BAD_STATE".into(), "match not in lobby".into()));
                     } else {
-                        m.phase = MatchPhase::Started;
-                        if m.game.is_none() {
-                            let players_len = m.players.len();
-                            let forehand = if players_len == 0 {
-                                0
-                            } else {
-                                (m.hand_no as u8) % (players_len as u8)
-                            };
-
-                            m.game = Some(trucoshi_game::GameState::new_with_forehand(
-                                players_len,
-                                Self::seed_for_hand(&msid, m.hand_no),
-                                m.options.turn_time_ms,
-                                Self::now_ms(),
-                                forehand,
+                        let players_len = m.players.len();
+                        if players_len < 2 {
+                            err = Some((
+                                "NOT_ENOUGH_PLAYERS".into(),
+                                "need at least 2 players".into(),
                             ));
+                        } else {
+                            let team_0 = m
+                                .players
+                                .iter()
+                                .filter(|p| p.team == TeamIdx::TEAM_0)
+                                .count();
+                            let team_1 = m
+                                .players
+                                .iter()
+                                .filter(|p| p.team == TeamIdx::TEAM_1)
+                                .count();
+
+                            if team_0 != team_1 {
+                                err = Some((
+                                    "UNBALANCED_TEAMS".into(),
+                                    "teams must be balanced".into(),
+                                ));
+                            } else if !m.players.iter().all(|p| p.ready) {
+                                err =
+                                    Some(("NOT_READY".into(), "all players must be ready".into()));
+                            } else {
+                                m.phase = MatchPhase::Started;
+                                if m.game.is_none() {
+                                    let forehand = (m.hand_no as u8) % (players_len as u8);
+
+                                    m.game = Some(trucoshi_game::GameState::new_with_forehand(
+                                        players_len,
+                                        Self::seed_for_hand(&msid, m.hand_no),
+                                        m.options.turn_time_ms,
+                                        Self::now_ms(),
+                                        forehand,
+                                    ));
+                                }
+                            }
                         }
                     }
                 }
@@ -1426,13 +1450,20 @@ impl Realtime {
             return Err(("MATCH_NOT_FOUND".into(), "match not found".into()));
         };
 
+        if m.phase != MatchPhase::Lobby {
+            return Err(("MATCH_NOT_JOINABLE".into(), "match already started".into()));
+        }
+
         if m.players.len() >= (m.options.max_players as usize) {
             return Err(("MATCH_FULL".into(), "match is full".into()));
         }
 
         let key = Uuid::new_v4().to_string();
 
-        // pick team (0/1) with capacity.
+        // Pick team (0/1) with capacity.
+        //
+        // Protocol v2: if the caller explicitly requests a team, we either honor it or
+        // reject with an error (no silent reassignment).
         let team_capacity = (m.options.max_players / 2) as usize;
         let team_0 = m
             .players
@@ -1445,31 +1476,39 @@ impl Realtime {
             .filter(|p| p.team == TeamIdx::TEAM_1)
             .count();
 
-        let team: Option<TeamIdx> = match requested_team {
-            Some(t) if t == TeamIdx::TEAM_0 && team_0 < team_capacity => Some(t),
-            Some(t) if t == TeamIdx::TEAM_1 && team_1 < team_capacity => Some(t),
-            Some(_) => None, // unreachable due to TeamIdx validation, but keep defensive.
-            None => {
-                if team_0 <= team_1 {
-                    if team_0 < team_capacity {
-                        Some(TeamIdx::TEAM_0)
-                    } else if team_1 < team_capacity {
-                        Some(TeamIdx::TEAM_1)
-                    } else {
-                        None
+        let team: TeamIdx = if let Some(t) = requested_team {
+            match t {
+                t if t == TeamIdx::TEAM_0 => {
+                    if team_0 >= team_capacity {
+                        return Err(("TEAM_FULL".into(), "team 0 is full".into()));
                     }
-                } else if team_1 < team_capacity {
-                    Some(TeamIdx::TEAM_1)
-                } else if team_0 < team_capacity {
-                    Some(TeamIdx::TEAM_0)
-                } else {
-                    None
+                    TeamIdx::TEAM_0
                 }
+                t if t == TeamIdx::TEAM_1 => {
+                    if team_1 >= team_capacity {
+                        return Err(("TEAM_FULL".into(), "team 1 is full".into()));
+                    }
+                    TeamIdx::TEAM_1
+                }
+                _ => return Err(("BAD_REQUEST".into(), "invalid team".into())),
             }
-        };
-
-        let Some(team) = team else {
-            return Err(("MATCH_FULL".into(), "no free slots".into()));
+        } else {
+            // Auto-assign to the least-populated team.
+            if team_0 <= team_1 {
+                if team_0 < team_capacity {
+                    TeamIdx::TEAM_0
+                } else if team_1 < team_capacity {
+                    TeamIdx::TEAM_1
+                } else {
+                    return Err(("MATCH_FULL".into(), "no free slots".into()));
+                }
+            } else if team_1 < team_capacity {
+                TeamIdx::TEAM_1
+            } else if team_0 < team_capacity {
+                TeamIdx::TEAM_0
+            } else {
+                return Err(("MATCH_FULL".into(), "no free slots".into()));
+            }
         };
 
         m.players.push(PlayerState {
@@ -1509,6 +1548,16 @@ impl Realtime {
                     if let Some(new_owner) = m.players.first() {
                         m.owner_key = new_owner.key.clone();
                     }
+                }
+
+                // If someone leaves mid-match, end the match.
+                //
+                // This keeps the realtime state consistent without attempting mid-hand
+                // substitutions/rebalancing.
+                if m.phase != MatchPhase::Lobby {
+                    m.phase = MatchPhase::Finished;
+                    m.game = None;
+                    m.pending_game = None;
                 }
 
                 // Remove match if empty.

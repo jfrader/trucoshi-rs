@@ -226,14 +226,51 @@ impl Default for MatchPhase {
     }
 }
 
+fn deserialize_match_max_players<'de, D>(d: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = u8::deserialize(d)?;
+    match v {
+        // Truco supports 1v1 (2), 2v2 (4), 3v3 (6).
+        2 | 4 | 6 => Ok(v),
+        _ => Err(serde::de::Error::custom(
+            "max_players must be one of: 2, 4, 6",
+        )),
+    }
+}
+
+#[cfg(feature = "json-schema")]
+fn schema_match_max_players(
+    _gen: &mut schemars::r#gen::SchemaGenerator,
+) -> schemars::schema::Schema {
+    use schemars::schema::{InstanceType, Schema, SchemaObject, SingleOrVec};
+    use serde_json::json;
+
+    let mut obj = SchemaObject {
+        instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Integer))),
+        format: Some("uint8".to_string()),
+        ..Default::default()
+    };
+
+    obj.enum_values = Some(vec![json!(2), json!(4), json!(6)]);
+
+    Schema::Object(obj)
+}
+
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MatchOptions {
     /// Maximum number of players allowed in the match.
     ///
-    /// Protocol v2: this is intentionally constrained to the UI-supported range.
-    #[cfg_attr(feature = "json-schema", schemars(range(min = 2, max = 6)))]
+    /// Protocol v2: enforced as an explicit enum (2/4/6), since Truco is always two teams
+    /// with equal sizes.
+    #[serde(deserialize_with = "deserialize_match_max_players")]
+    #[cfg_attr(
+        feature = "json-schema",
+        schemars(schema_with = "schema_match_max_players")
+    )]
     pub max_players: u8,
 
     /// Whether Flor is enabled.
