@@ -129,7 +129,13 @@ async fn main() -> anyhow::Result<()> {
             "/v1/tournaments",
             get(list_tournaments).post(create_tournament),
         )
-        .route("/v1/tournaments/:id/entries", post(join_tournament))
+        .route("/v1/tournaments/:id", get(get_tournament))
+        .route(
+            "/v1/tournaments/:id/entries",
+            get(list_tournament_entries).post(join_tournament),
+        )
+        .route("/v1/tournaments/:id/open", post(open_tournament))
+        .route("/v1/tournaments/:id/cancel", post(cancel_tournament))
         .route("/v1/auth/twitter", get(twitter_start))
         .route("/v1/auth/twitter/callback", get(twitter_callback))
         .layer(TraceLayer::new_for_http())
@@ -533,6 +539,124 @@ async fn list_tournaments(
     Ok(Json(list))
 }
 
+async fn get_tournament(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<Json<trucoshi_server::tournaments::types::Tournament>, ApiError> {
+    let repo = trucoshi_server::tournaments::repo::TournamentsRepo::new(state.store.pool.clone());
+    let t = repo
+        .get_tournament(id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("tournament not found"))?;
+
+    Ok(Json(t))
+}
+
+#[derive(Debug, Deserialize)]
+struct ListTournamentEntriesQuery {
+    #[serde(default = "default_tournament_limit")]
+    limit: i64,
+}
+
+async fn list_tournament_entries(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Query(q): Query<ListTournamentEntriesQuery>,
+) -> Result<Json<Vec<trucoshi_server::tournaments::types::TournamentEntry>>, ApiError> {
+    let repo = trucoshi_server::tournaments::repo::TournamentsRepo::new(state.store.pool.clone());
+
+    // Normalize to 404 if tournament doesn't exist.
+    if repo
+        .get_tournament(id)
+        .await
+        .map_err(ApiError::internal)?
+        .is_none()
+    {
+        return Err(ApiError::not_found("tournament not found"));
+    }
+
+    let limit = q.limit.clamp(1, 500);
+    let entries = repo
+        .list_entries(id, limit)
+        .await
+        .map_err(ApiError::internal)?;
+
+    Ok(Json(entries))
+}
+
+async fn open_tournament(
+    State(state): State<Arc<AppState>>,
+    AuthedUser { user_id }: AuthedUser,
+    Path(id): Path<i64>,
+) -> Result<Json<trucoshi_server::tournaments::types::Tournament>, ApiError> {
+    use trucoshi_server::tournaments::types::TournamentStatus;
+
+    let repo = trucoshi_server::tournaments::repo::TournamentsRepo::new(state.store.pool.clone());
+    let t = repo
+        .get_tournament(id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("tournament not found"))?;
+
+    if t.owner_user_id != Some(user_id) {
+        return Err(ApiError::forbidden("only the owner can open"));
+    }
+
+    match t.status {
+        TournamentStatus::Draft | TournamentStatus::Open => {}
+        TournamentStatus::Started | TournamentStatus::Finished => {
+            return Err(ApiError::bad_request("tournament already started"));
+        }
+        TournamentStatus::Cancelled => {
+            return Err(ApiError::bad_request("tournament cancelled"));
+        }
+    }
+
+    let updated = repo
+        .update_tournament_status(id, TournamentStatus::Open)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("tournament not found"))?;
+
+    Ok(Json(updated))
+}
+
+async fn cancel_tournament(
+    State(state): State<Arc<AppState>>,
+    AuthedUser { user_id }: AuthedUser,
+    Path(id): Path<i64>,
+) -> Result<Json<trucoshi_server::tournaments::types::Tournament>, ApiError> {
+    use trucoshi_server::tournaments::types::TournamentStatus;
+
+    let repo = trucoshi_server::tournaments::repo::TournamentsRepo::new(state.store.pool.clone());
+    let t = repo
+        .get_tournament(id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("tournament not found"))?;
+
+    if t.owner_user_id != Some(user_id) {
+        return Err(ApiError::forbidden("only the owner can cancel"));
+    }
+
+    match t.status {
+        TournamentStatus::Draft | TournamentStatus::Open => {}
+        TournamentStatus::Cancelled => return Ok(Json(t)),
+        TournamentStatus::Started | TournamentStatus::Finished => {
+            return Err(ApiError::bad_request("tournament already started"));
+        }
+    }
+
+    let updated = repo
+        .update_tournament_status(id, TournamentStatus::Cancelled)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("tournament not found"))?;
+
+    Ok(Json(updated))
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateTournamentRequest {
     name: String,
@@ -590,7 +714,30 @@ async fn join_tournament(
         return Err(ApiError::bad_request("display_name required"));
     }
 
+    use trucoshi_server::tournaments::types::TournamentStatus;
+
     let repo = trucoshi_server::tournaments::repo::TournamentsRepo::new(state.store.pool.clone());
+
+    let t = repo
+        .get_tournament(id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("tournament not found"))?;
+
+    match t.status {
+        TournamentStatus::Draft | TournamentStatus::Open => {}
+        TournamentStatus::Started | TournamentStatus::Finished => {
+            return Err(ApiError::bad_request("tournament already started"));
+        }
+        TournamentStatus::Cancelled => return Err(ApiError::bad_request("tournament cancelled")),
+    }
+
+    let max_players = (t.max_players as i64).max(0);
+    let count = repo.count_entries(id).await.map_err(ApiError::internal)?;
+    if max_players > 0 && count >= max_players {
+        return Err(ApiError::bad_request("tournament full"));
+    }
+
     let entry = repo
         .add_entry(id, Some(user_id), display_name)
         .await
@@ -648,6 +795,20 @@ impl ApiError {
     fn bad_request(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
+    }
+
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: message.into(),
+        }
+    }
+
+    fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
             message: message.into(),
         }
     }

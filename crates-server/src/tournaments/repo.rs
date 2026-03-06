@@ -98,6 +98,139 @@ impl TournamentsRepo {
             .collect())
     }
 
+    pub async fn get_tournament(&self, id: i64) -> anyhow::Result<Option<Tournament>> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            id: i64,
+            name: String,
+            status: String,
+            owner_user_id: Option<i64>,
+            max_players: i32,
+            starts_at: Option<OffsetDateTime>,
+            created_at: OffsetDateTime,
+            updated_at: OffsetDateTime,
+        }
+
+        let rec: Option<Row> = sqlx::query_as(
+            r#"
+            SELECT id, name, status, owner_user_id, max_players, starts_at, created_at, updated_at
+            FROM tournaments
+            WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(rec.map(|rec| Tournament {
+            id: rec.id,
+            name: rec.name,
+            status: parse_status(&rec.status),
+            owner_user_id: rec.owner_user_id,
+            max_players: rec.max_players,
+            starts_at: rec.starts_at,
+            created_at: rec.created_at,
+            updated_at: rec.updated_at,
+        }))
+    }
+
+    pub async fn update_tournament_status(
+        &self,
+        id: i64,
+        status: TournamentStatus,
+    ) -> anyhow::Result<Option<Tournament>> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            id: i64,
+            name: String,
+            status: String,
+            owner_user_id: Option<i64>,
+            max_players: i32,
+            starts_at: Option<OffsetDateTime>,
+            created_at: OffsetDateTime,
+            updated_at: OffsetDateTime,
+        }
+
+        let rec: Option<Row> = sqlx::query_as(
+            r#"
+            UPDATE tournaments
+            SET status = $2
+            WHERE id = $1
+            RETURNING id, name, status, owner_user_id, max_players, starts_at, created_at, updated_at
+            "#,
+        )
+        .bind(id)
+        .bind(status.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(rec.map(|rec| Tournament {
+            id: rec.id,
+            name: rec.name,
+            status: parse_status(&rec.status),
+            owner_user_id: rec.owner_user_id,
+            max_players: rec.max_players,
+            starts_at: rec.starts_at,
+            created_at: rec.created_at,
+            updated_at: rec.updated_at,
+        }))
+    }
+
+    pub async fn count_entries(&self, tournament_id: i64) -> anyhow::Result<i64> {
+        let (count,): (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(1)
+            FROM tournament_entries
+            WHERE tournament_id = $1
+            "#,
+        )
+        .bind(tournament_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(count)
+    }
+
+    pub async fn list_entries(
+        &self,
+        tournament_id: i64,
+        limit: i64,
+    ) -> anyhow::Result<Vec<TournamentEntry>> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            id: i64,
+            tournament_id: i64,
+            user_id: Option<i64>,
+            display_name: String,
+            created_at: OffsetDateTime,
+        }
+
+        let rows: Vec<Row> = sqlx::query_as(
+            r#"
+            SELECT id, tournament_id, user_id, display_name, created_at
+            FROM tournament_entries
+            WHERE tournament_id = $1
+            ORDER BY created_at ASC
+            LIMIT $2
+            "#,
+        )
+        .bind(tournament_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|rec| TournamentEntry {
+                id: rec.id,
+                tournament_id: rec.tournament_id,
+                user_id: rec.user_id,
+                display_name: rec.display_name,
+                created_at: rec.created_at,
+            })
+            .collect())
+    }
+
     pub async fn add_entry(
         &self,
         tournament_id: i64,
