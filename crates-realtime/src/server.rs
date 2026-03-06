@@ -1841,3 +1841,185 @@ impl Realtime {
         }
     }
 }
+
+#[cfg(test)]
+mod e2e_smoke_tests {
+    use super::*;
+    use crate::protocol::ws::v2::{
+        GamePlayCardData, MatchCreateData, MatchJoinData, MatchReadyData, MatchRefData, WsInMessage,
+    };
+
+    async fn add_session(
+        rt: &Realtime,
+        user_id: i64,
+    ) -> (Uuid, tokio::sync::mpsc::UnboundedReceiver<WsOutMessage>) {
+        let session_id = Uuid::new_v4();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<WsOutMessage>();
+
+        let mut s = rt.state.lock().await;
+        s.connections += 1;
+        s.sessions.insert(
+            session_id,
+            SessionState {
+                user_id,
+                tx,
+                active_match_id: None,
+                player_key: None,
+                rooms: std::collections::HashSet::new(),
+            },
+        );
+
+        (session_id, rx)
+    }
+
+    #[tokio::test]
+    async fn e2e_gameplay_smoke_two_clients_full_hand_finishes_match() {
+        let rt = Realtime::new();
+
+        let (s1, _rx1) = add_session(&rt, -1).await;
+        let (s2, _rx2) = add_session(&rt, -2).await;
+
+        // Create a 2-player match that finishes after a single hand.
+        rt.handle_message(
+            s1,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchCreate(MatchCreateData {
+                    name: "p1".into(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                    options: Some(MatchOptions {
+                        max_players: 2,
+                        flor: true,
+                        match_points: 1,
+                        turn_time_ms: 30_000,
+                    })
+                    .into(),
+                }),
+            },
+        )
+        .await;
+
+        let match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&s1)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("creator should be in a match")
+        };
+
+        // Join as second client.
+        rt.handle_message(
+            s2,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchJoin(MatchJoinData {
+                    match_id: match_id.clone(),
+                    name: "p2".into(),
+                    team: Some(TeamIdx::TEAM_1).into(),
+                }),
+            },
+        )
+        .await;
+
+        // Ready both clients.
+        for (sid, ready) in [(s1, true), (s2, true)] {
+            rt.handle_message(
+                sid,
+                WsInMessage {
+                    v: Default::default(),
+                    id: Default::default(),
+                    msg: C2sMessage::MatchReady(MatchReadyData {
+                        match_id: match_id.clone(),
+                        ready,
+                    }),
+                },
+            )
+            .await;
+        }
+
+        // Start (owner only).
+        rt.handle_message(
+            s1,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchStart(MatchRefData {
+                    match_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+
+        // Play out a full hand with two clients by always playing card_idx=0 on the current turn.
+        let mut plays = 0;
+        loop {
+            let (phase, team_points, turn_session_id, turn_hand_len) = {
+                let s = rt.state.lock().await;
+                let m = s
+                    .matches
+                    .get(&match_id)
+                    .unwrap_or_else(|| panic!("match not found: {match_id}"));
+
+                let phase = m.phase;
+                let team_points = m.team_points;
+
+                if phase == MatchPhase::Finished {
+                    (phase, team_points, s1, 0)
+                } else {
+                    let g = m.game.as_ref().expect("game state initialized after start");
+                    let turn_seat_idx = g.public.turn_seat_idx as usize;
+
+                    let key = m
+                        .players
+                        .get(turn_seat_idx)
+                        .unwrap_or_else(|| panic!("missing player for seat {turn_seat_idx}"))
+                        .key
+                        .clone();
+
+                    let turn_session_id = *s
+                        .sessions
+                        .iter()
+                        .find_map(|(sid, sess)| {
+                            (sess.player_key.as_deref() == Some(key.as_str())).then_some(sid)
+                        })
+                        .expect("expected a session for current turn player");
+
+                    let hand_len = g.hands().get(turn_seat_idx).map(|h| h.len()).unwrap_or(0);
+
+                    (phase, team_points, turn_session_id, hand_len)
+                }
+            };
+
+            if phase == MatchPhase::Finished {
+                assert!(
+                    team_points[0] + team_points[1] > 0,
+                    "expected points awarded"
+                );
+                break;
+            }
+
+            assert!(turn_hand_len > 0, "current turn player should have cards");
+
+            plays += 1;
+            assert!(
+                plays <= 12,
+                "expected match to finish quickly; plays={plays}"
+            );
+
+            rt.handle_message(
+                turn_session_id,
+                WsInMessage {
+                    v: Default::default(),
+                    id: Default::default(),
+                    msg: C2sMessage::GamePlayCard(GamePlayCardData {
+                        match_id: match_id.clone(),
+                        card_idx: 0,
+                    }),
+                },
+            )
+            .await;
+        }
+    }
+}
