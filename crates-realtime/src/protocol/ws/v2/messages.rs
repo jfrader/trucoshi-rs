@@ -84,7 +84,7 @@ pub struct ChatSayData {
 pub struct GamePlayCardData {
     pub match_id: String,
 
-    /// `cardIdx` references the caller's current hand ordering.
+    /// `card_idx` references the caller's current hand ordering.
     ///
     /// Message type: `game.play_card`
     pub card_idx: u8,

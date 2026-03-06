@@ -345,7 +345,7 @@
       ],
       "properties": {
         "card_idx": {
-          "description": "`cardIdx` references the caller's current hand ordering.\n\nMessage type: `game.play_card`",
+          "description": "`card_idx` references the caller's current hand ordering.\n\nMessage type: `game.play_card`",
           "type": "integer",
           "format": "uint8",
           "minimum": 0.0

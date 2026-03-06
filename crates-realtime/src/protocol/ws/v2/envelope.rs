@@ -87,7 +87,7 @@ impl TryFrom<u16> for WsVersion {
 /// {
 ///   "v": 2,
 ///   "id": "optional-correlation-id",
-///   "msg": { "type": "ping", "data": { "clientTimeMs": 123 } }
+///   "msg": { "type": "ping", "data": { "client_time_ms": 123 } }
 /// }
 ///
 /// All message `type` strings use dot-separated namespaces and `snake_case`.

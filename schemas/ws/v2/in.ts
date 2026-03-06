@@ -165,7 +165,7 @@ export interface ChatSayData {
 }
 export interface GamePlayCardData {
   /**
-   * `cardIdx` references the caller's current hand ordering.
+   * `card_idx` references the caller's current hand ordering.
    *
    * Message type: `game.play_card`
    */

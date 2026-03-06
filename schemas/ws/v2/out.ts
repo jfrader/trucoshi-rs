@@ -166,7 +166,7 @@ export interface MatchOptions {
 /**
  * Public player view (protocol v2).
  *
- * This is designed to be minimal and UI-friendly: - The players array ordering is server-defined and stable for the lifetime of the match. - `ready` is per-player (no separate match-level ready list) - Match ownership is exposed at the match level via `ownerSeatIdx`.
+ * This is designed to be minimal and UI-friendly: - The players array ordering is server-defined and stable for the lifetime of the match. - `ready` is per-player (no separate match-level ready list) - Match ownership is exposed at the match level via `owner_seat_idx`.
  *
  * Note: player keys are server-internal (session-bound) and are intentionally not exposed.
  */
