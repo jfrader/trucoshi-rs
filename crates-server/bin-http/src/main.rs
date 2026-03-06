@@ -147,6 +147,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/v1/tournaments/{id}/open", post(open_tournament))
         .route("/v1/tournaments/{id}/cancel", post(cancel_tournament))
+        .route("/v1/history/matches/{id}", get(get_match_history))
         .route("/v1/auth/twitter", get(twitter_start))
         .route("/v1/auth/twitter/callback", get(twitter_callback))
         .layer(TraceLayer::new_for_http())
@@ -816,6 +817,115 @@ async fn join_tournament(
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
+// ===== Match history =====
+
+#[derive(Debug, Deserialize)]
+struct MatchHistoryQuery {
+    limit: Option<i64>,
+    after_seq: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct MatchHistoryPlayerDto {
+    seat_idx: i32,
+    team_idx: i32,
+    user_id: Option<i64>,
+    display_name: String,
+    created_at: OffsetDateTime,
+}
+
+#[derive(Debug, Serialize)]
+struct MatchHistoryEventDto {
+    id: i64,
+    seq: i64,
+    created_at: OffsetDateTime,
+    actor_seat_idx: Option<i32>,
+    actor_user_id: Option<i64>,
+    #[serde(rename = "type")]
+    ty: String,
+    data: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+struct MatchHistoryResponse {
+    id: i64,
+    created_at: OffsetDateTime,
+    finished_at: Option<OffsetDateTime>,
+    server_version: Option<String>,
+    protocol_version: Option<i32>,
+    rng_seed: Option<i64>,
+    options: serde_json::Value,
+    players: Vec<MatchHistoryPlayerDto>,
+    events: Vec<MatchHistoryEventDto>,
+    next_after_seq: Option<i64>,
+}
+
+async fn get_match_history(
+    State(state): State<Arc<AppState>>,
+    Path(match_id): Path<i64>,
+    Query(q): Query<MatchHistoryQuery>,
+) -> Result<Json<MatchHistoryResponse>, ApiError> {
+    let summary = state
+        .store
+        .gh_get_match(match_id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("match not found"))?;
+
+    let players = state
+        .store
+        .gh_list_players(match_id)
+        .await
+        .map_err(ApiError::internal)?;
+
+    let limit = q.limit.unwrap_or(500).clamp(1, 1_000);
+    let events = state
+        .store
+        .gh_list_events(match_id, limit, q.after_seq)
+        .await
+        .map_err(ApiError::internal)?;
+
+    let reached_limit = (events.len() as i64) == limit;
+    let next_after_seq = if reached_limit {
+        events.last().map(|e| e.seq)
+    } else {
+        None
+    };
+
+    Ok(Json(MatchHistoryResponse {
+        id: summary.id,
+        created_at: summary.created_at,
+        finished_at: summary.finished_at,
+        server_version: summary.server_version,
+        protocol_version: summary.protocol_version,
+        rng_seed: summary.rng_seed,
+        options: summary.options,
+        players: players
+            .into_iter()
+            .map(|p| MatchHistoryPlayerDto {
+                seat_idx: p.seat_idx,
+                team_idx: p.team_idx,
+                user_id: p.user_id,
+                display_name: p.display_name,
+                created_at: p.created_at,
+            })
+            .collect(),
+        events: events
+            .into_iter()
+            .map(|e| MatchHistoryEventDto {
+                id: e.id,
+                seq: e.seq,
+                created_at: e.created_at,
+                actor_seat_idx: e.actor_seat_idx,
+                actor_user_id: e.actor_user_id,
+                ty: e.r#type,
+                data: e.data,
+            })
+            .collect(),
+        next_after_seq,
+    }))
+}
+
 // ===== Twitter (placeholders) =====
 
 async fn twitter_start(State(state): State<Arc<AppState>>) -> Result<Response, ApiError> {
@@ -916,7 +1026,97 @@ mod tests {
     use super::*;
 
     use axum::{Router, body::Body, http::Request, routing::get};
+    use http_body_util::BodyExt;
+    use serde_json::json;
+    use std::sync::Arc;
     use tower::util::ServiceExt;
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn match_history_endpoint_pages_events(pool: sqlx::PgPool) -> anyhow::Result<()> {
+        let store = trucoshi_store::Store { pool };
+
+        let match_id = store
+            .gh_create_match(
+                Some("0.2.0"),
+                Some(2),
+                Some(99),
+                &json!({ "ws_match_id": "m-test" }),
+            )
+            .await?;
+
+        store.gh_add_player(match_id, 0, 0, None, "p1").await?;
+        store.gh_add_player(match_id, 1, 1, None, "guest").await?;
+
+        store
+            .gh_append_event(
+                match_id,
+                0,
+                Some(0),
+                None,
+                "match.create",
+                &json!({ "ws_match_id": "m-test" }),
+            )
+            .await?;
+        store
+            .gh_append_event(
+                match_id,
+                1,
+                Some(1),
+                None,
+                "match.join",
+                &json!({ "ws_match_id": "m-test" }),
+            )
+            .await?;
+
+        store.gh_finish_match(match_id).await?;
+
+        let state = Arc::new(AppState {
+            store: store.clone(),
+            tokens: trucoshi_auth::tokens::TokenConfig {
+                issuer: "test".into(),
+                audience: "test".into(),
+                access_ttl: Duration::minutes(5),
+                refresh_ttl: Duration::minutes(5),
+                jwt_hs256_secret: vec![0; 32],
+            },
+            cookie: CookieConfig {
+                refresh_cookie_name: "refresh".into(),
+                refresh_cookie_path: "/v1/auth/refresh-tokens".into(),
+                secure: false,
+                same_site: SameSite::Lax,
+            },
+            twitter: TwitterConfig {
+                public_base_url: "http://localhost".into(),
+                client_id: "id".into(),
+                client_secret: "secret".into(),
+            },
+            realtime: trucoshi_realtime::server::Realtime::new(),
+        });
+
+        let app = Router::new()
+            .route("/v1/history/matches/{id}", get(get_match_history))
+            .with_state(state);
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/history/matches/{match_id}?limit=1"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["players"].as_array().unwrap().len(), 2);
+        assert_eq!(payload["events"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["next_after_seq"], serde_json::json!(0));
+
+        Ok(())
+    }
 
     #[tokio::test]
     async fn axum_route_params_match_brace_syntax() {

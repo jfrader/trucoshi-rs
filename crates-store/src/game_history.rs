@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 #[serde()]
 pub struct GameMatch {
     pub id: i64,
@@ -19,7 +19,7 @@ pub struct GameMatch {
     pub options: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 #[serde()]
 pub struct GameMatchPlayer {
     pub id: i64,
@@ -31,7 +31,7 @@ pub struct GameMatchPlayer {
     pub created_at: OffsetDateTime,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 #[serde()]
 pub struct GameMatchEvent {
     pub id: i64,
@@ -137,6 +137,165 @@ impl crate::Store {
         .bind(match_id)
         .execute(&self.pool)
         .await?;
+
+        Ok(())
+    }
+
+    pub async fn gh_get_match(&self, match_id: i64) -> anyhow::Result<Option<GameMatch>> {
+        let rec = sqlx::query_as::<_, GameMatch>(
+            r#"
+            SELECT id, created_at, finished_at, server_version, protocol_version, rng_seed, options
+            FROM game_matches
+            WHERE id = $1
+            "#,
+        )
+        .bind(match_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(rec)
+    }
+
+    pub async fn gh_list_players(&self, match_id: i64) -> anyhow::Result<Vec<GameMatchPlayer>> {
+        let rows = sqlx::query_as::<_, GameMatchPlayer>(
+            r#"
+            SELECT id, match_id, seat_idx, team_idx, user_id, display_name, created_at
+            FROM game_match_players
+            WHERE match_id = $1
+            ORDER BY seat_idx ASC
+            "#,
+        )
+        .bind(match_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn gh_list_events(
+        &self,
+        match_id: i64,
+        limit: i64,
+        after_seq: Option<i64>,
+    ) -> anyhow::Result<Vec<GameMatchEvent>> {
+        let limit = limit.clamp(1, 1_000);
+
+        let rows = sqlx::query_as::<_, GameMatchEvent>(
+            r#"
+            SELECT id, match_id, seq, created_at, actor_seat_idx, actor_user_id, type, data
+            FROM game_match_events
+            WHERE match_id = $1
+              AND ($2::BIGINT IS NULL OR seq > $2)
+            ORDER BY seq ASC
+            LIMIT $3
+            "#,
+        )
+        .bind(match_id)
+        .bind(after_seq)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Store;
+    use serde_json::json;
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn gh_read_helpers_return_rows(pool: sqlx::PgPool) -> anyhow::Result<()> {
+        let store = Store { pool };
+
+        let match_id = store
+            .gh_create_match(
+                Some("0.1.0"),
+                Some(2),
+                Some(42),
+                &json!({ "ws_match_id": "m1" }),
+            )
+            .await?;
+
+        store.gh_add_player(match_id, 0, 0, None, "p1").await?;
+        store.gh_add_player(match_id, 1, 1, None, "guest").await?;
+
+        store
+            .gh_append_event(
+                match_id,
+                0,
+                Some(0),
+                None,
+                "match.create",
+                &json!({ "ws_match_id": "m1" }),
+            )
+            .await?;
+        store
+            .gh_append_event(
+                match_id,
+                1,
+                Some(1),
+                None,
+                "match.join",
+                &json!({ "ws_match_id": "m1" }),
+            )
+            .await?;
+
+        store.gh_finish_match(match_id).await?;
+
+        let summary = store.gh_get_match(match_id).await?.expect("match row");
+        assert_eq!(summary.server_version.as_deref(), Some("0.1.0"));
+        assert!(summary.finished_at.is_some());
+
+        let players = store.gh_list_players(match_id).await?;
+        assert_eq!(players.len(), 2);
+        assert_eq!(players[0].seat_idx, 0);
+        assert_eq!(players[1].display_name, "guest");
+
+        let events = store.gh_list_events(match_id, 10, None).await?;
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].seq, 0);
+        assert_eq!(events[1].seq, 1);
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn gh_list_events_supports_after_seq(pool: sqlx::PgPool) -> anyhow::Result<()> {
+        let store = Store { pool };
+
+        let match_id = store
+            .gh_create_match(
+                Some("0.1.0"),
+                Some(2),
+                Some(7),
+                &json!({ "ws_match_id": "m2" }),
+            )
+            .await?;
+
+        for seq in 0..3 {
+            store
+                .gh_append_event(
+                    match_id,
+                    seq,
+                    None,
+                    None,
+                    "match.event",
+                    &json!({ "seq": seq }),
+                )
+                .await?;
+        }
+
+        let first_page = store.gh_list_events(match_id, 2, None).await?;
+        assert_eq!(first_page.len(), 2);
+        assert_eq!(first_page[0].seq, 0);
+        assert_eq!(first_page[1].seq, 1);
+
+        let after = first_page.last().map(|e| e.seq).unwrap();
+        let second_page = store.gh_list_events(match_id, 2, Some(after)).await?;
+        assert_eq!(second_page.len(), 1);
+        assert_eq!(second_page[0].seq, 2);
 
         Ok(())
     }
