@@ -170,8 +170,13 @@ impl GameState {
     /// Protocol v2 expects *strict* enums on the wire (no free-form strings). We also enforce
     /// a couple of key Truco constraints here to improve gameplay fidelity:
     /// - Envido/Flor family can only be called before any card is played in the hand.
+    /// - Flor commands are only exposed when the match enabled Flor.
     /// - Truco escalation is gated by the currently accepted value.
-    pub fn possible_commands_for_player(&self, player_idx: usize) -> Vec<GameCommand> {
+    pub fn possible_commands_for_player(
+        &self,
+        player_idx: usize,
+        flor_enabled: bool,
+    ) -> Vec<GameCommand> {
         use HandState::*;
 
         let hs = self.public.hand_state;
@@ -193,7 +198,7 @@ impl GameState {
                         GameCommand::FaltaEnvido,
                     ]);
 
-                    if has_flor {
+                    if flor_enabled && has_flor {
                         v.extend([
                             GameCommand::Flor,
                             GameCommand::ContraFlor,
@@ -853,12 +858,33 @@ mod tests {
         let mut g = GameState::new_with_forehand(2, 42, 10_000, now, 0);
         let teams = vec![0u8, 1u8];
 
-        let cmds = g.possible_commands_for_player(0);
+        let cmds = g.possible_commands_for_player(0, true);
         assert!(cmds.contains(&GameCommand::Envido));
 
         // After the first card is played, envido must no longer be offered.
         let _ = g.play_card(0, &teams, 10_000, now);
-        let cmds = g.possible_commands_for_player(1);
+        let cmds = g.possible_commands_for_player(1, true);
         assert!(!cmds.contains(&GameCommand::Envido));
+    }
+
+    #[test]
+    fn flor_commands_require_option_enabled() {
+        let now = 1000i64;
+        let mut g = GameState::new_with_forehand(2, 42, 10_000, now, 0);
+
+        // Force player 0 to have Flor (all same suit) so we can test command gating.
+        if let Some(hand) = g.hands.get_mut(0) {
+            *hand = vec!["1e".to_string(), "7e".to_string(), "3e".to_string()];
+        }
+
+        let cmds_with_flor = g.possible_commands_for_player(0, true);
+        assert!(cmds_with_flor.contains(&GameCommand::Flor));
+        assert!(cmds_with_flor.contains(&GameCommand::ContraFlor));
+
+        let cmds_without_flor = g.possible_commands_for_player(0, false);
+        assert!(!cmds_without_flor.iter().any(|c| matches!(
+            c,
+            GameCommand::Flor | GameCommand::ContraFlor | GameCommand::ContraFlorAlResto
+        )));
     }
 }

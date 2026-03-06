@@ -1429,7 +1429,8 @@ impl Realtime {
                             // Protocol v2 is strict: the command must be valid for the current
                             // public hand state.
                             if err.is_none() {
-                                let allowed = g.possible_commands_for_player(from_player_idx);
+                                let allowed =
+                                    g.possible_commands_for_player(from_player_idx, m.options.flor);
                                 if !allowed.contains(&command) {
                                     err = Some((
                                         "COMMAND_NOT_ALLOWED".into(),
@@ -1783,7 +1784,7 @@ impl Realtime {
         cards_for_calc.extend(used.iter().cloned());
 
         let commands = if (g.public.turn_seat_idx as usize) == idx {
-            g.possible_commands_for_player(idx)
+            g.possible_commands_for_player(idx, m.options.flor)
         } else {
             vec![]
         };
@@ -2446,9 +2447,12 @@ impl Realtime {
 mod e2e_smoke_tests {
     use super::*;
     use crate::protocol::ws::v2::messages::MatchWatchData;
+    use crate::protocol::ws::v2::schema::GameCommand;
     use crate::protocol::ws::v2::{
-        GamePlayCardData, MatchCreateData, MatchJoinData, MatchReadyData, MatchRefData, WsInMessage,
+        GamePlayCardData, GameSayData, MatchCreateData, MatchJoinData, MatchReadyData,
+        MatchRefData, WsInMessage,
     };
+    use tokio::sync::mpsc::error::TryRecvError;
 
     async fn add_session(
         rt: &Realtime,
@@ -2471,6 +2475,32 @@ mod e2e_smoke_tests {
         );
 
         (session_id, rx)
+    }
+
+    fn drain_receiver(rx: &mut tokio::sync::mpsc::UnboundedReceiver<WsOutMessage>) {
+        loop {
+            match rx.try_recv() {
+                Ok(_) => continue,
+                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+            }
+        }
+    }
+
+    async fn recv_error(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<WsOutMessage>,
+    ) -> Option<ErrorPayload> {
+        for _ in 0..10 {
+            match rx.recv().await {
+                Some(msg) => {
+                    if let S2cMessage::Error(err) = msg.msg {
+                        return Some(err);
+                    }
+                }
+                None => break,
+            }
+        }
+
+        None
     }
 
     #[tokio::test]
@@ -3486,6 +3516,105 @@ mod e2e_smoke_tests {
             saw_gameplay_action,
             "expected at least one gameplay history action (game.*)"
         );
+    }
+
+    #[tokio::test]
+    async fn flor_commands_disabled_when_option_off() {
+        let rt = Realtime::new();
+
+        let (s1, mut rx1) = add_session(&rt, -1).await;
+        let (s2, mut rx2) = add_session(&rt, -2).await;
+
+        rt.handle_message(
+            s1,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchCreate(MatchCreateData {
+                    name: "p1".into(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                    options: Some(MatchOptions {
+                        max_players: 2,
+                        flor: false,
+                        match_points: 1,
+                        turn_time_ms: 30_000,
+                    })
+                    .into(),
+                }),
+            },
+        )
+        .await;
+
+        let match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&s1)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("creator should be in a match")
+        };
+
+        rt.handle_message(
+            s2,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchJoin(MatchJoinData {
+                    match_id: match_id.clone(),
+                    name: "p2".into(),
+                    team: Some(TeamIdx::TEAM_1).into(),
+                }),
+            },
+        )
+        .await;
+
+        for (sid, ready) in [(s1, true), (s2, true)] {
+            rt.handle_message(
+                sid,
+                WsInMessage {
+                    v: Default::default(),
+                    id: Default::default(),
+                    msg: C2sMessage::MatchReady(MatchReadyData {
+                        match_id: match_id.clone(),
+                        ready,
+                    }),
+                },
+            )
+            .await;
+        }
+
+        rt.handle_message(
+            s1,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchStart(MatchRefData {
+                    match_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+
+        drain_receiver(&mut rx1);
+        drain_receiver(&mut rx2);
+
+        rt.handle_message(
+            s1,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::GameSay(GameSayData {
+                    match_id: match_id.clone(),
+                    command: GameCommand::Flor,
+                }),
+            },
+        )
+        .await;
+
+        let err = recv_error(&mut rx1)
+            .await
+            .unwrap_or_else(|| panic!("expected error response for flor command"));
+
+        assert_eq!(err.code, "COMMAND_NOT_ALLOWED");
     }
 
     #[tokio::test]
