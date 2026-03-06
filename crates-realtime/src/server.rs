@@ -65,6 +65,11 @@ pub struct MatchState {
     /// Team points (match score) for teams 0 and 1.
     pub team_points: [u8; 2],
 
+    /// Current hand number within the match (0-based).
+    ///
+    /// Used for deterministic dealing across reconnects + to derive per-hand RNG seeds.
+    pub hand_no: u32,
+
     /// Current hand/game state.
     pub game: Option<trucoshi_game::GameState>,
 
@@ -293,6 +298,7 @@ impl Realtime {
                     players: vec![player.clone()],
                     participants: HashSet::from([session_id]),
                     team_points: [0, 0],
+                    hand_no: 0,
                     game: None,
                     pending_game: None,
                 };
@@ -526,11 +532,19 @@ impl Realtime {
                     } else {
                         m.phase = MatchPhase::Started;
                         if m.game.is_none() {
-                            m.game = Some(trucoshi_game::GameState::new(
-                                m.players.len(),
-                                Self::seed_from_str(&msid),
+                            let players_len = m.players.len();
+                            let forehand = if players_len == 0 {
+                                0
+                            } else {
+                                (m.hand_no as u8) % (players_len as u8)
+                            };
+
+                            m.game = Some(trucoshi_game::GameState::new_with_forehand(
+                                players_len,
+                                Self::seed_for_hand(&msid, m.hand_no),
                                 m.options.turn_time_ms,
                                 Self::now_ms(),
+                                forehand,
                             ));
                         }
                     }
@@ -745,11 +759,19 @@ impl Realtime {
 
                         if err.is_none() {
                             if m.game.is_none() {
-                                m.game = Some(trucoshi_game::GameState::new(
-                                    m.players.len(),
-                                    Self::seed_from_str(&msid),
+                                let players_len = m.players.len();
+                                let forehand = if players_len == 0 {
+                                    0
+                                } else {
+                                    (m.hand_no as u8) % (players_len as u8)
+                                };
+
+                                m.game = Some(trucoshi_game::GameState::new_with_forehand(
+                                    players_len,
+                                    Self::seed_for_hand(&msid, m.hand_no),
                                     m.options.turn_time_ms,
                                     Self::now_ms(),
+                                    forehand,
                                 ));
                             }
                             let g = m.game.as_mut().expect("game state initialized");
@@ -794,16 +816,23 @@ impl Realtime {
                                             g.public.hand_state = HandState::Finished;
                                             g.public.winner_team_idx = Some(winner_team_idx);
 
-                                            m.pending_game = Some(trucoshi_game::GameState::new(
-                                                m.players.len(),
-                                                Self::seed_from_str(&format!(
-                                                    "{}:{}",
-                                                    msid,
-                                                    Uuid::new_v4()
-                                                )),
-                                                m.options.turn_time_ms,
-                                                Self::now_ms(),
-                                            ));
+                                            let players_len = m.players.len();
+                                            let next_forehand = if players_len == 0 {
+                                                0
+                                            } else {
+                                                (g.public.forehand_seat_idx + 1)
+                                                    % (players_len as u8)
+                                            };
+
+                                            m.hand_no = m.hand_no.saturating_add(1);
+                                            m.pending_game =
+                                                Some(trucoshi_game::GameState::new_with_forehand(
+                                                    players_len,
+                                                    Self::seed_for_hand(&msid, m.hand_no),
+                                                    m.options.turn_time_ms,
+                                                    Self::now_ms(),
+                                                    next_forehand,
+                                                ));
                                         }
                                     }
                                     _ => {}
@@ -887,11 +916,19 @@ impl Realtime {
                         err = Some(("MATCH_NOT_STARTED".into(), "match not started".into()));
                     } else {
                         if m.game.is_none() {
-                            m.game = Some(trucoshi_game::GameState::new(
-                                m.players.len(),
-                                Self::seed_from_str(&msid),
+                            let players_len = m.players.len();
+                            let forehand = if players_len == 0 {
+                                0
+                            } else {
+                                (m.hand_no as u8) % (players_len as u8)
+                            };
+
+                            m.game = Some(trucoshi_game::GameState::new_with_forehand(
+                                players_len,
+                                Self::seed_for_hand(&msid, m.hand_no),
                                 m.options.turn_time_ms,
                                 Self::now_ms(),
+                                forehand,
                             ));
                         }
                         let g = m.game.as_mut().expect("game state initialized");
@@ -929,16 +966,22 @@ impl Realtime {
                                     g.public.hand_state = HandState::Finished;
                                     g.public.winner_team_idx = Some(winner_team_idx);
 
-                                    m.pending_game = Some(trucoshi_game::GameState::new(
-                                        m.players.len(),
-                                        Self::seed_from_str(&format!(
-                                            "{}:{}",
-                                            msid,
-                                            Uuid::new_v4()
-                                        )),
-                                        m.options.turn_time_ms,
-                                        Self::now_ms(),
-                                    ));
+                                    let players_len = m.players.len();
+                                    let next_forehand = if players_len == 0 {
+                                        0
+                                    } else {
+                                        (g.public.forehand_seat_idx + 1) % (players_len as u8)
+                                    };
+
+                                    m.hand_no = m.hand_no.saturating_add(1);
+                                    m.pending_game =
+                                        Some(trucoshi_game::GameState::new_with_forehand(
+                                            players_len,
+                                            Self::seed_for_hand(&msid, m.hand_no),
+                                            m.options.turn_time_ms,
+                                            Self::now_ms(),
+                                            next_forehand,
+                                        ));
                                 }
                             }
                         }
@@ -994,6 +1037,14 @@ impl Realtime {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         s.hash(&mut h);
         h.finish()
+    }
+
+    fn seed_for_hand(match_id: &str, hand_no: u32) -> u64 {
+        if hand_no == 0 {
+            Self::seed_from_str(match_id)
+        } else {
+            Self::seed_from_str(&format!("{match_id}:{hand_no}"))
+        }
     }
 
     async fn send_to(&self, session_id: Uuid, msg: WsOutMessage) {
