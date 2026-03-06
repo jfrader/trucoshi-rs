@@ -369,7 +369,7 @@ impl Realtime {
                         Self::err_out(
                             id,
                             "MATCH_MISMATCH",
-                            "message matchId does not match your active match",
+                            "message match_id does not match your active match",
                         ),
                     )
                     .await;
@@ -430,7 +430,7 @@ impl Realtime {
                         Self::err_out(
                             id,
                             "MATCH_MISMATCH",
-                            "message matchId does not match your active match",
+                            "message match_id does not match your active match",
                         ),
                     )
                     .await;
@@ -492,7 +492,7 @@ impl Realtime {
                         Self::err_out(
                             id,
                             "MATCH_MISMATCH",
-                            "message matchId does not match your active match",
+                            "message match_id does not match your active match",
                         ),
                     )
                     .await;
@@ -567,7 +567,7 @@ impl Realtime {
                         Self::err_out(
                             id,
                             "MATCH_MISMATCH",
-                            "message matchId does not match your active match",
+                            "message match_id does not match your active match",
                         ),
                     )
                     .await;
@@ -634,7 +634,7 @@ impl Realtime {
                         Self::err_out(
                             id,
                             "MATCH_MISMATCH",
-                            "message matchId does not match your active match",
+                            "message match_id does not match your active match",
                         ),
                     )
                     .await;
@@ -702,7 +702,7 @@ impl Realtime {
                         Self::err_out(
                             id,
                             "MATCH_MISMATCH",
-                            "message matchId does not match your active match",
+                            "message match_id does not match your active match",
                         ),
                     )
                     .await;
@@ -846,7 +846,7 @@ impl Realtime {
                         Self::err_out(
                             id,
                             "MATCH_MISMATCH",
-                            "message matchId does not match your active match",
+                            "message match_id does not match your active match",
                         ),
                     )
                     .await;
