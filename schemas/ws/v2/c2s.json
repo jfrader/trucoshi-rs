@@ -77,6 +77,26 @@
       "additionalProperties": false
     },
     {
+      "description": "Join a match as a spectator (hands hidden; no seat).",
+      "type": "object",
+      "required": [
+        "data",
+        "type"
+      ],
+      "properties": {
+        "data": {
+          "$ref": "#/definitions/MatchWatchData"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "match.watch"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    {
       "type": "object",
       "required": [
         "data",
@@ -482,6 +502,19 @@
       "additionalProperties": false
     },
     "MatchRefData": {
+      "type": "object",
+      "required": [
+        "match_id"
+      ],
+      "properties": {
+        "match_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "MatchWatchData": {
+      "description": "Join a match as a spectator (does not occupy a player seat).",
       "type": "object",
       "required": [
         "match_id"

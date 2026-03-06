@@ -24,6 +24,10 @@ export type C2SMessage =
       type: 'match.join';
     }
   | {
+      data: MatchWatchData;
+      type: 'match.watch';
+    }
+  | {
       data: MatchRefData;
       type: 'match.leave';
     }
@@ -148,6 +152,12 @@ export interface MatchJoinData {
    * Optional requested team (0 or 1). Server may override if full.
    */
   team?: TeamIdx;
+}
+/**
+ * Join a match as a spectator (does not occupy a player seat).
+ */
+export interface MatchWatchData {
+  match_id: string;
 }
 export interface MatchRefData {
   match_id: string;

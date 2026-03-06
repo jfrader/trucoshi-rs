@@ -180,12 +180,12 @@ impl Realtime {
         }
 
         // cleanup
-        let mut maybe_leave: Option<(String, String, i64)> = None;
+        let mut maybe_leave: Option<(String, Option<String>, i64)> = None;
         {
             let mut s = self.state.lock().await;
             if let Some(sess) = s.sessions.remove(&session_id) {
-                if let (Some(msid), Some(pkey)) = (sess.active_match_id, sess.player_key) {
-                    maybe_leave = Some((msid, pkey, sess.user_id));
+                if let Some(msid) = sess.active_match_id {
+                    maybe_leave = Some((msid, sess.player_key, sess.user_id));
                 }
             }
             s.connections = s.connections.saturating_sub(1);
@@ -193,13 +193,18 @@ impl Realtime {
         }
 
         if let Some((msid, pkey, user_id)) = maybe_leave {
-            let removed = self
-                .leave_match_internal(session_id, &msid, &pkey, user_id, "disconnect")
-                .await;
-            if removed {
-                self.broadcast_lobby_match_remove(&msid).await;
+            if let Some(pkey) = pkey.as_deref() {
+                let removed = self
+                    .leave_match_internal(session_id, &msid, pkey, user_id, "disconnect")
+                    .await;
+                if removed {
+                    self.broadcast_lobby_match_remove(&msid).await;
+                } else {
+                    self.broadcast_lobby_match_upsert(&msid).await;
+                }
             } else {
-                self.broadcast_lobby_match_upsert(&msid).await;
+                // spectator: just detach from match participants / rooms
+                self.leave_match_watch_internal(session_id, &msid).await;
             }
         }
 
@@ -451,6 +456,63 @@ impl Realtime {
                 }
             }
 
+            C2sMessage::MatchWatch(d) => {
+                let match_id = d.match_id;
+
+                // v2: do not allow watching a match while already in a match.
+                let already_in_match = {
+                    let s = self.state.lock().await;
+                    s.sessions
+                        .get(&session_id)
+                        .map(|sess| sess.active_match_id.is_some())
+                        .unwrap_or(false)
+                };
+
+                if already_in_match {
+                    self.send_to(
+                        session_id,
+                        Self::err_out(id, "ALREADY_IN_MATCH", "already in a match"),
+                    )
+                    .await;
+                    return;
+                }
+
+                // Add as a participant (but do not create a player seat).
+                let exists = {
+                    let mut s = self.state.lock().await;
+                    match s.matches.get_mut(&match_id) {
+                        Some(m) => {
+                            m.participants.insert(session_id);
+
+                            if let Some(sess) = s.sessions.get_mut(&session_id) {
+                                sess.active_match_id = Some(match_id.clone());
+                                sess.player_key = None;
+                            }
+
+                            true
+                        }
+                        None => false,
+                    }
+                };
+
+                if !exists {
+                    self.send_to(
+                        session_id,
+                        Self::err_out(id, "MATCH_NOT_FOUND", "match not found"),
+                    )
+                    .await;
+                    return;
+                }
+
+                // Auto-join the match chat room (room id == match_id)
+                self.join_room_internal(session_id, &match_id).await;
+
+                // Send immediate snapshots to spectator (hands hidden, me omitted).
+                self.emit_match_snapshot_to(session_id, &match_id, id.clone())
+                    .await;
+                self.emit_game_snapshot_to(session_id, &match_id, id).await;
+            }
+
             C2sMessage::MatchLeave(d) => {
                 let (msid, pkey, user_id) = {
                     let s = self.state.lock().await;
@@ -464,9 +526,9 @@ impl Realtime {
                     )
                 };
 
-                let (msid, pkey) = match (msid, pkey) {
-                    (Some(msid), Some(pkey)) => (msid, pkey),
-                    _ => {
+                let msid = match msid {
+                    Some(msid) => msid,
+                    None => {
                         self.send_to(
                             session_id,
                             Self::err_out(id, "NOT_IN_MATCH", "not in a match"),
@@ -489,14 +551,26 @@ impl Realtime {
                     return;
                 }
 
-                let removed = self
-                    .leave_match_internal(session_id, &msid, &pkey, user_id, "client_leave")
-                    .await;
-                if removed {
-                    self.broadcast_lobby_match_remove(&msid).await;
+                // Player vs spectator leave:
+                // - players have a player_key and occupy a seat
+                // - spectators have no player_key and should only be removed from participants
+                let _removed = if let Some(pkey) = pkey.as_deref() {
+                    let removed = self
+                        .leave_match_internal(session_id, &msid, pkey, user_id, "client_leave")
+                        .await;
+
+                    if removed {
+                        self.broadcast_lobby_match_remove(&msid).await;
+                    } else {
+                        self.broadcast_lobby_match_upsert(&msid).await;
+                    }
+
+                    removed
                 } else {
-                    self.broadcast_lobby_match_upsert(&msid).await;
-                }
+                    // spectator: just detach
+                    self.leave_match_watch_internal(session_id, &msid).await;
+                    false
+                };
 
                 // Explicit confirmation (new v2, no legacy quirks).
                 self.send_to(
@@ -519,12 +593,16 @@ impl Realtime {
                 let msid = d.match_id;
                 let ready = d.ready;
 
-                let (active_msid, pkey) = {
+                let (active_msid, pkey, actor_user_id) = {
                     let s = self.state.lock().await;
                     let Some(sess) = s.sessions.get(&session_id) else {
                         return;
                     };
-                    (sess.active_match_id.clone(), sess.player_key.clone())
+                    (
+                        sess.active_match_id.clone(),
+                        sess.player_key.clone(),
+                        sess.user_id,
+                    )
                 };
 
                 let (active_msid, pkey) = match (active_msid, pkey) {
@@ -552,6 +630,8 @@ impl Realtime {
                     return;
                 }
 
+                let now_ms = Self::now_ms();
+                let mut history_action: Option<GameHistoryEvent> = None;
                 {
                     let mut s = self.state.lock().await;
                     let Some(m) = s.matches.get_mut(&msid) else {
@@ -563,14 +643,32 @@ impl Realtime {
                         .await;
                         return;
                     };
-                    if let Some(p) = m.players.iter_mut().find(|p| p.key == pkey) {
-                        p.ready = ready;
+
+                    if let Some(seat_idx) = m.players.iter().position(|p| p.key == pkey) {
+                        if let Some(p) = m.players.get_mut(seat_idx) {
+                            p.ready = ready;
+                            history_action = Some(GameHistoryEvent::GameAction {
+                                match_id: msid.clone(),
+                                actor_seat_idx: u8::try_from(seat_idx).unwrap_or(0),
+                                actor_team_idx: p.team.as_u8(),
+                                actor_user_id,
+                                ty: "match.ready".into(),
+                                data: serde_json::json!({
+                                    "ready": ready,
+                                    "server_time_ms": now_ms,
+                                }),
+                            });
+                        }
                     }
 
                     // Readiness is tracked per-player; the match lifecycle phase remains `lobby`
                     // until the owner successfully starts the match.
                     //
                     // (We intentionally avoid encoding readiness into `PublicMatch.phase`.)
+                }
+
+                if let Some(ev) = history_action.take() {
+                    self.emit_history(ev);
                 }
 
                 let correlated = id.clone().map(|id| (session_id, id));
@@ -692,12 +790,16 @@ impl Realtime {
             C2sMessage::MatchPause(d) => {
                 let msid = d.match_id;
 
-                let (active_msid, pkey) = {
+                let (active_msid, pkey, actor_user_id) = {
                     let s = self.state.lock().await;
                     let Some(sess) = s.sessions.get(&session_id) else {
                         return;
                     };
-                    (sess.active_match_id.clone(), sess.player_key.clone())
+                    (
+                        sess.active_match_id.clone(),
+                        sess.player_key.clone(),
+                        sess.user_id,
+                    )
                 };
 
                 let (active_msid, pkey) = match (active_msid, pkey) {
@@ -725,7 +827,9 @@ impl Realtime {
                     return;
                 }
 
+                let now_ms = Self::now_ms();
                 let mut err: Option<(String, String)> = None;
+                let mut history_action: Option<GameHistoryEvent> = None;
                 {
                     let mut s = self.state.lock().await;
                     let Some(m) = s.matches.get_mut(&msid) else {
@@ -742,6 +846,21 @@ impl Realtime {
                     } else if m.phase != MatchPhase::Started {
                         err = Some(("BAD_STATE".into(), "match not started".into()));
                     } else {
+                        if let Some(seat_idx) = m.players.iter().position(|p| p.key == pkey) {
+                            if let Some(p) = m.players.get(seat_idx) {
+                                history_action = Some(GameHistoryEvent::GameAction {
+                                    match_id: msid.clone(),
+                                    actor_seat_idx: u8::try_from(seat_idx).unwrap_or(0),
+                                    actor_team_idx: p.team.as_u8(),
+                                    actor_user_id,
+                                    ty: "match.pause".into(),
+                                    data: serde_json::json!({
+                                        "server_time_ms": now_ms,
+                                    }),
+                                });
+                            }
+                        }
+
                         m.phase = MatchPhase::Paused;
                     }
                 }
@@ -749,6 +868,10 @@ impl Realtime {
                 if let Some((code, msg)) = err {
                     self.send_to(session_id, Self::err_out(id, code, msg)).await;
                     return;
+                }
+
+                if let Some(ev) = history_action.take() {
+                    self.emit_history(ev);
                 }
 
                 let correlated = id.clone().map(|id| (session_id, id));
@@ -759,12 +882,16 @@ impl Realtime {
             C2sMessage::MatchResume(d) => {
                 let msid = d.match_id;
 
-                let (active_msid, pkey) = {
+                let (active_msid, pkey, actor_user_id) = {
                     let s = self.state.lock().await;
                     let Some(sess) = s.sessions.get(&session_id) else {
                         return;
                     };
-                    (sess.active_match_id.clone(), sess.player_key.clone())
+                    (
+                        sess.active_match_id.clone(),
+                        sess.player_key.clone(),
+                        sess.user_id,
+                    )
                 };
 
                 let (active_msid, pkey) = match (active_msid, pkey) {
@@ -792,7 +919,9 @@ impl Realtime {
                     return;
                 }
 
+                let now_ms = Self::now_ms();
                 let mut err: Option<(String, String)> = None;
+                let mut history_action: Option<GameHistoryEvent> = None;
                 {
                     let mut s = self.state.lock().await;
                     let Some(m) = s.matches.get_mut(&msid) else {
@@ -809,6 +938,21 @@ impl Realtime {
                     } else if m.phase != MatchPhase::Paused {
                         err = Some(("BAD_STATE".into(), "match not paused".into()));
                     } else {
+                        if let Some(seat_idx) = m.players.iter().position(|p| p.key == pkey) {
+                            if let Some(p) = m.players.get(seat_idx) {
+                                history_action = Some(GameHistoryEvent::GameAction {
+                                    match_id: msid.clone(),
+                                    actor_seat_idx: u8::try_from(seat_idx).unwrap_or(0),
+                                    actor_team_idx: p.team.as_u8(),
+                                    actor_user_id,
+                                    ty: "match.resume".into(),
+                                    data: serde_json::json!({
+                                        "server_time_ms": now_ms,
+                                    }),
+                                });
+                            }
+                        }
+
                         m.phase = MatchPhase::Started;
                     }
                 }
@@ -816,6 +960,10 @@ impl Realtime {
                 if let Some((code, msg)) = err {
                     self.send_to(session_id, Self::err_out(id, code, msg)).await;
                     return;
+                }
+
+                if let Some(ev) = history_action.take() {
+                    self.emit_history(ev);
                 }
 
                 let correlated = id.clone().map(|id| (session_id, id));
@@ -1917,6 +2065,29 @@ impl Realtime {
         removed
     }
 
+    /// Detach a spectator/watch session from a match.
+    ///
+    /// Unlike `leave_match_internal`, this does not remove a player seat.
+    async fn leave_match_watch_internal(&self, session_id: Uuid, match_id: &str) {
+        {
+            let mut s = self.state.lock().await;
+
+            if let Some(m) = s.matches.get_mut(match_id) {
+                m.participants.remove(&session_id);
+            }
+
+            if let Some(sess) = s.sessions.get_mut(&session_id) {
+                if sess.active_match_id.as_deref() == Some(match_id) {
+                    sess.active_match_id = None;
+                }
+                sess.player_key = None;
+            }
+        }
+
+        // Match chat room id == match_id.
+        self.leave_room_internal(session_id, match_id).await;
+    }
+
     async fn join_room_internal(&self, session_id: Uuid, room_id: &str) {
         let mut s = self.state.lock().await;
 
@@ -2456,33 +2627,86 @@ mod e2e_smoke_tests {
         // event. Instead, assert that lifecycle events happen in order and that at least one
         // gameplay action was observed before the match finished.
 
-        let ev0 = timeout(Duration::from_millis(200), history_rx.recv())
-            .await
-            .expect("history event timeout")
-            .expect("history channel closed");
-        assert!(matches!(ev0, GameHistoryEvent::MatchCreated { .. }));
+        let mut pre_start: Vec<GameHistoryEvent> = Vec::new();
 
-        let ev1 = timeout(Duration::from_millis(200), history_rx.recv())
-            .await
-            .expect("history event timeout")
-            .expect("history channel closed");
-        assert!(matches!(ev1, GameHistoryEvent::PlayerJoined { .. }));
-
-        let ev2 = timeout(Duration::from_millis(200), history_rx.recv())
-            .await
-            .expect("history event timeout")
-            .expect("history channel closed");
-        assert!(matches!(ev2, GameHistoryEvent::MatchStarted { .. }));
-
-        let mut saw_action = false;
+        // Drain events until we see the match start.
         loop {
             let ev = timeout(Duration::from_millis(500), history_rx.recv())
                 .await
                 .expect("history event timeout")
                 .expect("history channel closed");
 
-            if matches!(ev, GameHistoryEvent::GameAction { .. }) {
-                saw_action = true;
+            let started = matches!(ev, GameHistoryEvent::MatchStarted { .. });
+            pre_start.push(ev);
+
+            if started {
+                break;
+            }
+
+            assert!(
+                pre_start.len() <= 10,
+                "too many pre-start history events: {pre_start:?}"
+            );
+        }
+
+        let idx_created = pre_start
+            .iter()
+            .position(|ev| matches!(ev, GameHistoryEvent::MatchCreated { .. }))
+            .expect("expected MatchCreated event");
+
+        let idx_joined = pre_start
+            .iter()
+            .position(|ev| matches!(ev, GameHistoryEvent::PlayerJoined { .. }))
+            .expect("expected PlayerJoined event");
+
+        let idx_started = pre_start
+            .iter()
+            .position(|ev| matches!(ev, GameHistoryEvent::MatchStarted { .. }))
+            .expect("expected MatchStarted event");
+
+        assert!(
+            idx_created < idx_started,
+            "MatchCreated must precede MatchStarted"
+        );
+        assert!(
+            idx_joined < idx_started,
+            "PlayerJoined must precede MatchStarted"
+        );
+
+        let ready_actions = pre_start
+            .iter()
+            .filter_map(|ev| match ev {
+                GameHistoryEvent::GameAction { ty, data, .. } if ty == "match.ready" => Some(data),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ready_actions.len(),
+            2,
+            "expected two match.ready history actions (one per client)"
+        );
+
+        for data in ready_actions {
+            assert_eq!(
+                data.get("ready").and_then(|v| v.as_bool()),
+                Some(true),
+                "expected ready=true in match.ready data: {data}"
+            );
+        }
+
+        // Continue draining until finished; require at least one gameplay action.
+        let mut saw_gameplay_action = false;
+        loop {
+            let ev = timeout(Duration::from_millis(500), history_rx.recv())
+                .await
+                .expect("history event timeout")
+                .expect("history channel closed");
+
+            if let GameHistoryEvent::GameAction { ty, .. } = &ev {
+                if ty.starts_with("game.") {
+                    saw_gameplay_action = true;
+                }
             }
 
             if matches!(ev, GameHistoryEvent::MatchFinished { .. }) {
@@ -2490,6 +2714,9 @@ mod e2e_smoke_tests {
             }
         }
 
-        assert!(saw_action, "expected at least one gameplay history action");
+        assert!(
+            saw_gameplay_action,
+            "expected at least one gameplay history action (game.*)"
+        );
     }
 }

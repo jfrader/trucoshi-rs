@@ -63,6 +63,14 @@ pub struct MatchRefData {
     pub match_id: String,
 }
 
+/// Join a match as a spectator (does not occupy a player seat).
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MatchWatchData {
+    pub match_id: String,
+}
+
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -220,6 +228,10 @@ pub enum C2sMessage {
 
     #[serde(rename = "match.join")]
     MatchJoin(MatchJoinData),
+
+    /// Join a match as a spectator (hands hidden; no seat).
+    #[serde(rename = "match.watch")]
+    MatchWatch(MatchWatchData),
 
     #[serde(rename = "match.leave")]
     MatchLeave(MatchRefData),
