@@ -409,6 +409,28 @@ pub struct PublicPlayer {
     pub ready: bool,
 }
 
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActiveMatchPlayer {
+    pub seat_idx: u8,
+    pub team: TeamIdx,
+    pub ready: bool,
+    pub is_owner: bool,
+    pub last_active_ms: i64,
+    #[serde(default, skip_serializing_if = "Maybe::is_none")]
+    pub disconnected_at_ms: Maybe<i64>,
+}
+
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActiveMatchSummary {
+    #[serde(rename = "match")]
+    pub match_: PublicMatch,
+    pub me: ActiveMatchPlayer,
+}
+
 /// Recipient-only private view of the current player.
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]

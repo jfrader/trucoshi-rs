@@ -75,6 +75,21 @@
         {
           "type": "object",
           "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "me.active_matches.get"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
             "data",
             "type"
           ],

@@ -16,6 +16,9 @@ export type C2SMessage =
       type: 'lobby.snapshot.get';
     }
   | {
+      type: 'me.active_matches.get';
+    }
+  | {
       data: MatchCreateData;
       type: 'match.create';
     }

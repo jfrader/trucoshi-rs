@@ -1,4 +1,4 @@
-use super::{C2sMessage, S2cMessage, WsInMessage, WsOutMessage};
+use super::{ActiveMatchesSnapshotData, C2sMessage, S2cMessage, WsInMessage, WsOutMessage};
 
 #[cfg(feature = "json-schema")]
 use schemars::schema::RootSchema;
@@ -234,8 +234,9 @@ fn is_ws_type_string(s: &str) -> bool {
 #[test]
 fn ws_protocol_message_type_strings_are_snake_case_dot_namespaces() {
     use super::schema::{
-        HandState, LobbyMatch, MatchOptions, MatchPhase, Maybe, PlayedCard, PublicChatMessage,
-        PublicChatRoom, PublicChatUser, PublicGameState, PublicMatch, PublicPlayer, TeamIdx,
+        ActiveMatchPlayer, ActiveMatchSummary, HandState, LobbyMatch, MatchOptions, MatchPhase,
+        Maybe, PlayedCard, PublicChatMessage, PublicChatRoom, PublicChatUser, PublicGameState,
+        PublicMatch, PublicPlayer, TeamIdx,
     };
     use super::{
         ChatJoinData, ChatMessageData, ChatSayData, ChatSnapshotData, ErrorPayload,
@@ -280,6 +281,18 @@ fn ws_protocol_message_type_strings_are_snake_case_dot_namespaces() {
         team_points: [0, 0],
     };
 
+    let active_summary = ActiveMatchSummary {
+        match_: public_match.clone(),
+        me: ActiveMatchPlayer {
+            seat_idx: 0,
+            team: TeamIdx::TEAM_0,
+            ready: false,
+            is_owner: true,
+            last_active_ms: 0,
+            disconnected_at_ms: Maybe(None),
+        },
+    };
+
     let public_game = PublicGameState {
         hand_state: HandState::WaitingPlay,
         forehand_seat_idx: 0,
@@ -308,6 +321,7 @@ fn ws_protocol_message_type_strings_are_snake_case_dot_namespaces() {
     let c2s_types = vec![
         type_of(C2sMessage::Ping(PingData { client_time_ms: 0 })),
         type_of(C2sMessage::LobbySnapshotGet),
+        type_of(C2sMessage::MeActiveMatchesGet),
         type_of(C2sMessage::MatchCreate(MatchCreateData {
             name: "n".into(),
             team: Default::default(),
@@ -368,6 +382,9 @@ fn ws_protocol_message_type_strings_are_snake_case_dot_namespaces() {
         type_of(S2cMessage::Hello(HelloData {
             session_id: "s".into(),
             server_version: "v".into(),
+        })),
+        type_of(S2cMessage::MeActiveMatches(ActiveMatchesSnapshotData {
+            matches: vec![active_summary.clone()],
         })),
         type_of(S2cMessage::LobbySnapshot(LobbySnapshotData {
             matches: vec![lobby_match.clone()],

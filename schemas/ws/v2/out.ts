@@ -17,6 +17,10 @@ export type S2CMessage =
       type: 'hello';
     }
   | {
+      data: ActiveMatchesSnapshotData;
+      type: 'me.active_matches';
+    }
+  | {
       data: LobbySnapshotData;
       type: 'lobby.snapshot';
     }
@@ -66,6 +70,7 @@ export type S2CMessage =
     };
 export type MatchPhase = 'lobby' | 'started' | 'paused' | 'finished';
 export type TeamIdx = 0 | 1;
+export type Int64 = number;
 /**
  * Core gameplay commands (Truco argentino).
  */
@@ -121,17 +126,19 @@ export interface HelloData {
   server_version: string;
   session_id: string;
 }
-export interface LobbySnapshotData {
-  matches: LobbyMatch[];
+export interface ActiveMatchesSnapshotData {
+  matches: ActiveMatchSummary[];
+}
+export interface ActiveMatchSummary {
+  match: PublicMatch;
+  me: ActiveMatchPlayer;
 }
 /**
- * Lobby match summary (protocol v2).
+ * Public match snapshot (protocol v2).
  *
- * This is intentionally minimal and is the only match type used by lobby events. It should stay stable and UI-friendly.
- *
- * Note: we intentionally duplicate fields between `LobbyMatch` and `PublicMatch` instead of using a `flatten`ed base struct. This keeps Rust-side ergonomics simple and avoids schema/ generator edge-cases.
+ * This is the authoritative match state used by match-scoped events.
  */
-export interface LobbyMatch {
+export interface PublicMatch {
   /**
    * Match id (opaque).
    */
@@ -150,6 +157,13 @@ export interface LobbyMatch {
    * Number of currently connected spectator (watch) sessions.
    */
   spectator_count: number;
+  /**
+   * Current match points for teams 0 and 1.
+   *
+   * @minItems 2
+   * @maxItems 2
+   */
+  team_points: [number, number];
 }
 export interface MatchOptions {
   /**
@@ -195,25 +209,25 @@ export interface PublicPlayer {
   ready: boolean;
   team: TeamIdx;
 }
-export interface LobbyMatchUpsertData {
-  match: LobbyMatch;
+export interface ActiveMatchPlayer {
+  disconnected_at_ms?: Int64;
+  is_owner: boolean;
+  last_active_ms: number;
+  ready: boolean;
+  seat_idx: number;
+  team: TeamIdx;
 }
-export interface LobbyMatchRemoveData {
-  /**
-   * Match id (same value as `PublicMatch.id`).
-   */
-  match_id: string;
-}
-export interface MatchSnapshotData {
-  match: PublicMatch;
-  me?: PrivatePlayer;
+export interface LobbySnapshotData {
+  matches: LobbyMatch[];
 }
 /**
- * Public match snapshot (protocol v2).
+ * Lobby match summary (protocol v2).
  *
- * This is the authoritative match state used by match-scoped events.
+ * This is intentionally minimal and is the only match type used by lobby events. It should stay stable and UI-friendly.
+ *
+ * Note: we intentionally duplicate fields between `LobbyMatch` and `PublicMatch` instead of using a `flatten`ed base struct. This keeps Rust-side ergonomics simple and avoids schema/ generator edge-cases.
  */
-export interface PublicMatch {
+export interface LobbyMatch {
   /**
    * Match id (opaque).
    */
@@ -232,13 +246,19 @@ export interface PublicMatch {
    * Number of currently connected spectator (watch) sessions.
    */
   spectator_count: number;
+}
+export interface LobbyMatchUpsertData {
+  match: LobbyMatch;
+}
+export interface LobbyMatchRemoveData {
   /**
-   * Current match points for teams 0 and 1.
-   *
-   * @minItems 2
-   * @maxItems 2
+   * Match id (same value as `PublicMatch.id`).
    */
-  team_points: [number, number];
+  match_id: string;
+}
+export interface MatchSnapshotData {
+  match: PublicMatch;
+  me?: PrivatePlayer;
 }
 /**
  * Recipient-only private view of the current player.

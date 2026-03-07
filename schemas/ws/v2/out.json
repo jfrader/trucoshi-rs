@@ -35,6 +35,71 @@
   },
   "additionalProperties": false,
   "definitions": {
+    "ActiveMatchPlayer": {
+      "type": "object",
+      "required": [
+        "is_owner",
+        "last_active_ms",
+        "ready",
+        "seat_idx",
+        "team"
+      ],
+      "properties": {
+        "disconnected_at_ms": {
+          "$ref": "#/definitions/int64"
+        },
+        "is_owner": {
+          "type": "boolean"
+        },
+        "last_active_ms": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "seat_idx": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "team": {
+          "$ref": "#/definitions/TeamIdx"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ActiveMatchSummary": {
+      "type": "object",
+      "required": [
+        "match",
+        "me"
+      ],
+      "properties": {
+        "match": {
+          "$ref": "#/definitions/PublicMatch"
+        },
+        "me": {
+          "$ref": "#/definitions/ActiveMatchPlayer"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ActiveMatchesSnapshotData": {
+      "type": "object",
+      "required": [
+        "matches"
+      ],
+      "properties": {
+        "matches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ActiveMatchSummary"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "ChatMessageData": {
       "type": "object",
       "required": [
@@ -703,6 +768,25 @@
           ],
           "properties": {
             "data": {
+              "$ref": "#/definitions/ActiveMatchesSnapshotData"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "me.active_matches"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "type"
+          ],
+          "properties": {
+            "data": {
               "$ref": "#/definitions/LobbySnapshotData"
             },
             "type": {
@@ -943,6 +1027,10 @@
       "const": 2,
       "maximum": 2.0,
       "minimum": 2.0
+    },
+    "int64": {
+      "type": "integer",
+      "format": "int64"
     },
     "uint8": {
       "type": "integer",

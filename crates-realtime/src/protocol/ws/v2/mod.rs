@@ -19,9 +19,9 @@ pub mod schema;
 pub use envelope::{WS_PROTOCOL_VERSION, WsInMessage, WsOutMessage, WsVersion};
 pub use error::ErrorPayload;
 pub use messages::{
-    C2sMessage, ChatJoinData, ChatMessageData, ChatSayData, ChatSnapshotData, GamePlayCardData,
-    GameSayData, GameSnapshotData, GameUpdateData, HelloData, LobbyMatchRemoveData,
-    LobbyMatchUpsertData, LobbySnapshotData, MatchCreateData, MatchJoinData, MatchLeftData,
-    MatchReadyData, MatchRefData, MatchSnapshotData, MatchUpdateData, PingData, PongData,
-    S2cMessage,
+    ActiveMatchesSnapshotData, C2sMessage, ChatJoinData, ChatMessageData, ChatSayData,
+    ChatSnapshotData, GamePlayCardData, GameSayData, GameSnapshotData, GameUpdateData, HelloData,
+    LobbyMatchRemoveData, LobbyMatchUpsertData, LobbySnapshotData, MatchCreateData, MatchJoinData,
+    MatchLeftData, MatchReadyData, MatchRefData, MatchSnapshotData, MatchUpdateData, PingData,
+    PongData, S2cMessage,
 };

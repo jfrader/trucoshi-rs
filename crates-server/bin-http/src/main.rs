@@ -12,6 +12,8 @@ use std::{convert::TryFrom, net::SocketAddr, sync::Arc};
 use time::{Duration, OffsetDateTime};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use trucoshi_realtime::protocol::ws::v2::schema::ActiveMatchSummary;
+use trucoshi_realtime::server::Realtime;
 
 mod game_history;
 
@@ -21,7 +23,7 @@ struct AppState {
     tokens: trucoshi_auth::tokens::TokenConfig,
     cookie: CookieConfig,
     twitter: TwitterConfig,
-    realtime: trucoshi_realtime::server::Realtime,
+    realtime: Realtime,
 }
 
 #[derive(Clone)]
@@ -124,7 +126,7 @@ async fn main() -> anyhow::Result<()> {
             client_id: twitter_client_id,
             client_secret: twitter_client_secret,
         },
-        realtime: trucoshi_realtime::server::Realtime::new_with_history(history_tx),
+        realtime: Realtime::new_with_history(history_tx),
     });
 
     let app = Router::new()
@@ -148,6 +150,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/tournaments/{id}/open", post(open_tournament))
         .route("/v1/tournaments/{id}/cancel", post(cancel_tournament))
         .route("/v1/history/matches/{id}", get(get_match_history))
+        .route("/v1/matches/active", get(list_active_matches))
         .route("/v1/stats/players/{id}", get(get_player_profile))
         .route("/v1/stats/leaderboard", get(get_leaderboard))
         .route("/v1/auth/twitter", get(twitter_start))
@@ -837,6 +840,19 @@ struct MatchHistoryPlayerDto {
 }
 
 #[derive(Debug, Serialize)]
+struct ListActiveMatchesResponse {
+    matches: Vec<ActiveMatchSummary>,
+}
+
+async fn list_active_matches(
+    State(state): State<Arc<AppState>>,
+    AuthedUser { user_id }: AuthedUser,
+) -> Result<Json<ListActiveMatchesResponse>, ApiError> {
+    let matches = state.realtime.list_active_matches_for_user(user_id).await;
+    Ok(Json(ListActiveMatchesResponse { matches }))
+}
+
+#[derive(Debug, Serialize)]
 struct MatchHistoryEventDto {
     id: i64,
     seq: i64,
@@ -1398,7 +1414,7 @@ mod tests {
                 client_id: "id".into(),
                 client_secret: "secret".into(),
             },
-            realtime: trucoshi_realtime::server::Realtime::new(),
+            realtime: Realtime::new(),
         });
 
         let app = Router::new()
@@ -1422,6 +1438,67 @@ mod tests {
         assert_eq!(payload["players"].as_array().unwrap().len(), 2);
         assert_eq!(payload["events"].as_array().unwrap().len(), 1);
         assert_eq!(payload["next_after_seq"], serde_json::json!(0));
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn active_matches_endpoint_returns_empty_list(pool: sqlx::PgPool) -> anyhow::Result<()> {
+        let store = trucoshi_store::Store { pool };
+
+        let user_id: i64 = sqlx::query_scalar(
+            "INSERT INTO users (email, password_hash, name) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind("alice@example.com")
+        .bind("hash")
+        .bind("Alice")
+        .fetch_one(&store.pool)
+        .await?;
+
+        let state = Arc::new(AppState {
+            store: store.clone(),
+            tokens: trucoshi_auth::tokens::TokenConfig {
+                issuer: "test".into(),
+                audience: "test".into(),
+                access_ttl: Duration::minutes(5),
+                refresh_ttl: Duration::minutes(5),
+                jwt_hs256_secret: vec![0; 32],
+            },
+            cookie: CookieConfig {
+                refresh_cookie_name: "refresh".into(),
+                refresh_cookie_path: "/v1/auth/refresh-tokens".into(),
+                secure: false,
+                same_site: SameSite::Lax,
+            },
+            twitter: TwitterConfig {
+                public_base_url: "http://localhost".into(),
+                client_id: "id".into(),
+                client_secret: "secret".into(),
+            },
+            realtime: Realtime::new(),
+        });
+
+        let token = trucoshi_auth::jwt::issue_access_jwt(&state.tokens, user_id).unwrap();
+
+        let app = Router::new()
+            .route("/v1/matches/active", get(list_active_matches))
+            .with_state(state);
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/matches/active")
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["matches"], serde_json::json!([]));
 
         Ok(())
     }
@@ -1542,7 +1619,7 @@ mod tests {
                 client_id: "id".into(),
                 client_secret: "secret".into(),
             },
-            realtime: trucoshi_realtime::server::Realtime::new(),
+            realtime: Realtime::new(),
         });
 
         let app = Router::new()
@@ -1711,7 +1788,7 @@ mod tests {
                 client_id: "id".into(),
                 client_secret: "secret".into(),
             },
-            realtime: trucoshi_realtime::server::Realtime::new(),
+            realtime: Realtime::new(),
         });
 
         let app = Router::new()

@@ -5,8 +5,8 @@ use schemars::JsonSchema;
 
 use super::ErrorPayload;
 use super::schema::{
-    GameCommand, LobbyMatch, MatchOptions, Maybe, PrivatePlayer, PublicChatMessage, PublicChatRoom,
-    PublicGameState, PublicMatch, TeamIdx,
+    ActiveMatchSummary, GameCommand, LobbyMatch, MatchOptions, Maybe, PrivatePlayer,
+    PublicChatMessage, PublicChatRoom, PublicGameState, PublicMatch, TeamIdx,
 };
 
 // ===== Client -> Server payloads =====
@@ -142,6 +142,13 @@ pub struct LobbySnapshotData {
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ActiveMatchesSnapshotData {
+    pub matches: Vec<ActiveMatchSummary>,
+}
+
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LobbyMatchUpsertData {
     #[serde(rename = "match")]
     pub match_: LobbyMatch,
@@ -239,6 +246,9 @@ pub enum C2sMessage {
     #[serde(rename = "lobby.snapshot.get")]
     LobbySnapshotGet,
 
+    #[serde(rename = "me.active_matches.get")]
+    MeActiveMatchesGet,
+
     #[serde(rename = "match.create")]
     MatchCreate(MatchCreateData),
 
@@ -303,6 +313,9 @@ pub enum S2cMessage {
 
     #[serde(rename = "hello")]
     Hello(HelloData),
+
+    #[serde(rename = "me.active_matches")]
+    MeActiveMatches(ActiveMatchesSnapshotData),
 
     #[serde(rename = "lobby.snapshot")]
     LobbySnapshot(LobbySnapshotData),

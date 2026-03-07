@@ -1,12 +1,13 @@
 use crate::history::{GameHistoryEvent, HistoryPlayer};
-use crate::protocol::ws::v2::messages::MatchKickedData;
+use crate::protocol::ws::v2::messages::{ActiveMatchesSnapshotData, MatchKickedData};
 use crate::protocol::ws::v2::{
     C2sMessage, ChatMessageData, ChatSnapshotData, ErrorPayload, GameSnapshotData, GameUpdateData,
     HelloData, LobbyMatchRemoveData, LobbyMatchUpsertData, LobbySnapshotData, MatchLeftData,
     MatchSnapshotData, MatchUpdateData, PongData, S2cMessage, WsInMessage, WsOutMessage,
     schema::{
-        HandState, LobbyMatch, MatchOptions, MatchPhase, Maybe, PrivatePlayer, PublicChatMessage,
-        PublicChatRoom, PublicChatUser, PublicMatch, PublicPlayer, TeamIdx,
+        ActiveMatchPlayer, ActiveMatchSummary, HandState, LobbyMatch, MatchOptions, MatchPhase,
+        Maybe, PrivatePlayer, PublicChatMessage, PublicChatRoom, PublicChatUser, PublicMatch,
+        PublicPlayer, TeamIdx,
     },
 };
 use anyhow::Context;
@@ -124,6 +125,46 @@ impl Realtime {
             state: Arc::new(Mutex::new(RealtimeState::default())),
             history_tx: Some(history_tx),
         }
+    }
+
+    /// Return a stable snapshot of unfinished matches the given user is seated in.
+    pub async fn list_active_matches_for_user(&self, user_id: i64) -> Vec<ActiveMatchSummary> {
+        let mut entries = {
+            let s = self.state.lock().await;
+            let mut matches = Vec::new();
+
+            for m in s.matches.values() {
+                if m.phase == MatchPhase::Finished {
+                    continue;
+                }
+
+                if let Some(idx) = m.players.iter().position(|p| p.user_id == user_id) {
+                    let public = Self::public_match_for(m);
+                    let player = m.players[idx].clone();
+
+                    matches.push(ActiveMatchSummary {
+                        match_: public,
+                        me: ActiveMatchPlayer {
+                            seat_idx: u8::try_from(idx).unwrap_or(0),
+                            team: player.team,
+                            ready: player.ready,
+                            is_owner: player.key == m.owner_key,
+                            last_active_ms: player.last_active_ms,
+                            disconnected_at_ms: Maybe(player.disconnected_at_ms),
+                        },
+                    });
+                }
+            }
+
+            matches
+        };
+
+        entries.sort_by(|a, b| {
+            b.me.last_active_ms
+                .cmp(&a.me.last_active_ms)
+                .then_with(|| a.match_.id.cmp(&b.match_.id))
+        });
+        entries
     }
 
     fn emit_history(&self, ev: GameHistoryEvent) {
@@ -288,6 +329,27 @@ impl Realtime {
             C2sMessage::LobbySnapshotGet => {
                 // Echo correlation id on the snapshot (v2 does not require a separate ack).
                 self.emit_lobby_snapshot_to(session_id, id).await;
+            }
+
+            C2sMessage::MeActiveMatchesGet => {
+                let user_id = {
+                    let s = self.state.lock().await;
+                    let Some(sess) = s.sessions.get(&session_id) else {
+                        return;
+                    };
+                    sess.user_id
+                };
+
+                let matches = self.list_active_matches_for_user(user_id).await;
+                self.send_to(
+                    session_id,
+                    WsOutMessage {
+                        v: Default::default(),
+                        msg: S2cMessage::MeActiveMatches(ActiveMatchesSnapshotData { matches }),
+                        id: id.clone().into(),
+                    },
+                )
+                .await;
             }
 
             C2sMessage::MatchSnapshotGet(d) => {
@@ -5146,5 +5208,162 @@ mod e2e_smoke_tests {
             .await
             .expect("expected BAD_STATE error");
         assert_eq!(err.code, "BAD_STATE");
+    }
+    #[tokio::test]
+    async fn list_active_matches_includes_lobby_entries_and_skips_finished() {
+        let rt = Realtime::new();
+        let (owner, _rx_owner) = add_session(&rt, 5_000).await;
+        let (player, _rx_player) = add_session(&rt, 5_001).await;
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchCreate(MatchCreateData {
+                    name: "owner".into(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                    options: Some(MatchOptions {
+                        max_players: 2,
+                        match_points: 12,
+                        turn_time_ms: 30_000,
+                        ..MatchOptions::default()
+                    })
+                    .into(),
+                }),
+            },
+        )
+        .await;
+
+        let match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&owner)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("owner should be in a match")
+        };
+
+        rt.handle_message(
+            player,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchJoin(MatchJoinData {
+                    match_id: match_id.clone(),
+                    name: "player".into(),
+                    team: Some(TeamIdx::TEAM_1).into(),
+                }),
+            },
+        )
+        .await;
+
+        {
+            let mut s = rt.state.lock().await;
+            if let Some(m) = s.matches.get_mut(&match_id) {
+                if let Some(p) = m.players.iter_mut().find(|p| p.user_id == 5_001) {
+                    p.disconnected_at_ms = Some(42);
+                }
+            }
+        }
+
+        let owner_matches = rt.list_active_matches_for_user(5_000).await;
+        assert_eq!(owner_matches.len(), 1);
+        assert_eq!(owner_matches[0].match_.id, match_id);
+        assert!(owner_matches[0].me.is_owner);
+        assert_eq!(owner_matches[0].me.seat_idx, 0);
+        assert!(!owner_matches[0].me.ready);
+
+        let player_matches = rt.list_active_matches_for_user(5_001).await;
+        assert_eq!(player_matches.len(), 1);
+        assert_eq!(player_matches[0].me.seat_idx, 1);
+        let disc: Option<i64> = player_matches[0].me.disconnected_at_ms.clone().into();
+        assert_eq!(disc, Some(42));
+        assert!(!player_matches[0].me.is_owner);
+
+        {
+            let mut s = rt.state.lock().await;
+            if let Some(m) = s.matches.get_mut(&match_id) {
+                m.phase = MatchPhase::Finished;
+            }
+        }
+
+        assert!(rt.list_active_matches_for_user(5_000).await.is_empty());
+        assert!(rt.list_active_matches_for_user(5_001).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn me_active_matches_get_returns_snapshot_for_owner() {
+        let rt = Realtime::new();
+        let (owner, mut rx_owner) = add_session(&rt, 6_000).await;
+        let (player, _rx_player) = add_session(&rt, 6_001).await;
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchCreate(MatchCreateData {
+                    name: "owner".into(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                    options: Some(MatchOptions {
+                        max_players: 2,
+                        match_points: 12,
+                        turn_time_ms: 30_000,
+                        ..MatchOptions::default()
+                    })
+                    .into(),
+                }),
+            },
+        )
+        .await;
+
+        let match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&owner)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("owner should be in a match")
+        };
+
+        rt.handle_message(
+            player,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchJoin(MatchJoinData {
+                    match_id: match_id.clone(),
+                    name: "player".into(),
+                    team: Some(TeamIdx::TEAM_1).into(),
+                }),
+            },
+        )
+        .await;
+
+        drain_receiver(&mut rx_owner);
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Some("req-1".into()).into(),
+                msg: C2sMessage::MeActiveMatchesGet,
+            },
+        )
+        .await;
+
+        let msg = rx_owner.recv().await.expect("ws response");
+        let echoed_id: Option<String> = msg.id.clone().into();
+        assert_eq!(echoed_id.as_deref(), Some("req-1"));
+
+        let snapshot = match msg.msg {
+            S2cMessage::MeActiveMatches(data) => data,
+            other => panic!("unexpected message: {other:?}"),
+        };
+
+        assert_eq!(snapshot.matches.len(), 1);
+        assert_eq!(snapshot.matches[0].match_.id, match_id);
+        assert!(snapshot.matches[0].me.is_owner);
+        assert_eq!(snapshot.matches[0].me.seat_idx, 0);
+        assert_eq!(snapshot.matches[0].match_.phase, MatchPhase::Lobby);
     }
 }
