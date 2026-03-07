@@ -71,7 +71,16 @@ pub struct MatchKickData {
     pub seat_idx: u8,
 }
 
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MatchOptionsSetData {
+    pub match_id: String,
+    pub options: MatchOptions,
+}
+
 /// Join a match as a spectator (does not occupy a player seat).
+
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -281,6 +290,9 @@ pub enum C2sMessage {
 
     #[serde(rename = "match.resume")]
     MatchResume(MatchRefData),
+
+    #[serde(rename = "match.options.set")]
+    MatchOptionsSet(MatchOptionsSetData),
 
     /// Restart a finished match into a fresh lobby with the same players/teams.
     #[serde(rename = "match.rematch")]

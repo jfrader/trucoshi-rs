@@ -271,7 +271,7 @@ fn default_falta_envido() -> u8 {
 }
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MatchOptions {
     /// Maximum number of players allowed in the match.

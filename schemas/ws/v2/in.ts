@@ -59,6 +59,10 @@ export type C2SMessage =
       type: 'match.resume';
     }
   | {
+      data: MatchOptionsSetData;
+      type: 'match.options.set';
+    }
+  | {
       data: MatchRefData;
       type: 'match.rematch';
     }
@@ -188,6 +192,42 @@ export interface MatchRefData {
 export interface MatchReadyData {
   match_id: string;
   ready: boolean;
+}
+export interface MatchOptionsSetData {
+  match_id: string;
+  options: MatchOptions2;
+}
+export interface MatchOptions2 {
+  /**
+   * Inactivity window before a disconnected player is removed.
+   */
+  abandon_time_ms?: number;
+  /**
+   * Falta Envido scoring mode (`1` = two faltas / 2 × `match_points`, `2` = one falta / `match_points`).
+   */
+  falta_envido?: number;
+  /**
+   * Whether Flor is enabled.
+   */
+  flor: boolean;
+  /**
+   * Points required to win the match.
+   */
+  match_points: number;
+  /**
+   * Maximum number of players allowed in the match.
+   *
+   * Protocol v2: enforced as an explicit enum (2/4/6), since Truco is always two teams with equal sizes.
+   */
+  max_players: 2 | 4 | 6;
+  /**
+   * Minimum grace after a websocket drop before sweeps run.
+   */
+  reconnect_grace_ms?: number;
+  /**
+   * Turn timer in milliseconds.
+   */
+  turn_time_ms: number;
 }
 export interface MatchKickData {
   match_id: string;

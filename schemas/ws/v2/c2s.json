@@ -247,6 +247,25 @@
       "additionalProperties": false
     },
     {
+      "type": "object",
+      "required": [
+        "data",
+        "type"
+      ],
+      "properties": {
+        "data": {
+          "$ref": "#/definitions/MatchOptionsSetData"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "match.options.set"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    {
       "description": "Restart a finished match into a fresh lobby with the same players/teams.",
       "type": "object",
       "required": [
@@ -577,6 +596,86 @@
           "format": "int64",
           "maximum": 600000.0,
           "minimum": 1.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "MatchOptions2": {
+      "type": "object",
+      "required": [
+        "flor",
+        "match_points",
+        "max_players",
+        "turn_time_ms"
+      ],
+      "properties": {
+        "abandon_time_ms": {
+          "description": "Inactivity window before a disconnected player is removed.",
+          "default": 120000,
+          "type": "integer",
+          "format": "int64",
+          "maximum": 600000.0,
+          "minimum": 1.0
+        },
+        "falta_envido": {
+          "description": "Falta Envido scoring mode (`1` = two faltas / 2 × `match_points`, `2` = one falta / `match_points`).",
+          "default": 2,
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 2.0,
+          "minimum": 1.0
+        },
+        "flor": {
+          "description": "Whether Flor is enabled.",
+          "type": "boolean"
+        },
+        "match_points": {
+          "description": "Points required to win the match.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 15.0,
+          "minimum": 1.0
+        },
+        "max_players": {
+          "description": "Maximum number of players allowed in the match.\n\nProtocol v2: enforced as an explicit enum (2/4/6), since Truco is always two teams with equal sizes.",
+          "type": "integer",
+          "format": "uint8",
+          "enum": [
+            2,
+            4,
+            6
+          ]
+        },
+        "reconnect_grace_ms": {
+          "description": "Minimum grace after a websocket drop before sweeps run.",
+          "default": 5000,
+          "type": "integer",
+          "format": "int64",
+          "maximum": 60000.0,
+          "minimum": 1.0
+        },
+        "turn_time_ms": {
+          "description": "Turn timer in milliseconds.",
+          "type": "integer",
+          "format": "int64",
+          "maximum": 600000.0,
+          "minimum": 1.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "MatchOptionsSetData": {
+      "type": "object",
+      "required": [
+        "match_id",
+        "options"
+      ],
+      "properties": {
+        "match_id": {
+          "type": "string"
+        },
+        "options": {
+          "$ref": "#/definitions/MatchOptions2"
         }
       },
       "additionalProperties": false

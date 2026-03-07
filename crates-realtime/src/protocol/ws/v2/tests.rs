@@ -1,4 +1,5 @@
 use super::{ActiveMatchesSnapshotData, C2sMessage, S2cMessage, WsInMessage, WsOutMessage};
+use crate::protocol::ws::v2::messages::MatchOptionsSetData;
 
 #[cfg(feature = "json-schema")]
 use schemars::schema::RootSchema;
@@ -353,6 +354,10 @@ fn ws_protocol_message_type_strings_are_snake_case_dot_namespaces() {
         })),
         type_of(C2sMessage::MatchResume(MatchRefData {
             match_id: "m".into(),
+        })),
+        type_of(C2sMessage::MatchOptionsSet(MatchOptionsSetData {
+            match_id: "m".into(),
+            options: MatchOptions::default(),
         })),
         type_of(C2sMessage::MatchRematch(MatchRefData {
             match_id: "m".into(),

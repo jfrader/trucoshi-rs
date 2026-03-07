@@ -1171,6 +1171,167 @@ impl Realtime {
                 self.broadcast_lobby_match_upsert(&msid).await;
             }
 
+            C2sMessage::MatchOptionsSet(d) => {
+                let msid = d.match_id;
+                let new_options = d.options;
+
+                let (active_msid, owner_key, actor_user_id) = {
+                    let s = self.state.lock().await;
+                    let Some(sess) = s.sessions.get(&session_id) else {
+                        return;
+                    };
+                    (
+                        sess.active_match_id.clone(),
+                        sess.player_key.clone(),
+                        sess.user_id,
+                    )
+                };
+
+                let active_msid = match active_msid {
+                    Some(active_msid) => active_msid,
+                    None => {
+                        self.send_to(
+                            session_id,
+                            Self::err_out(id, "NOT_IN_MATCH", "not in a match"),
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                let owner_key = match owner_key {
+                    Some(pkey) => pkey,
+                    None => {
+                        self.send_to(
+                            session_id,
+                            Self::err_out(id, "NOT_A_PLAYER", "not a player (spectator)"),
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                if active_msid != msid {
+                    self.send_to(
+                        session_id,
+                        Self::err_out(
+                            id,
+                            "MATCH_MISMATCH",
+                            "message match_id does not match your active match",
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+
+                let now_ms = Self::now_ms();
+                let mut err: Option<(String, String)> = None;
+                let mut history_action: Option<GameHistoryEvent> = None;
+                {
+                    let mut s = self.state.lock().await;
+                    let Some(m) = s.matches.get_mut(&msid) else {
+                        self.send_to(
+                            session_id,
+                            Self::err_out(id, "MATCH_NOT_FOUND", "match not found"),
+                        )
+                        .await;
+                        return;
+                    };
+
+                    if m.owner_key != owner_key {
+                        err = Some((
+                            "NOT_OWNER".into(),
+                            "only the owner can update options".into(),
+                        ));
+                    } else if m.phase != MatchPhase::Lobby {
+                        err = Some(("BAD_STATE".into(), "match not in lobby".into()));
+                    } else {
+                        let player_count = m.players.len();
+                        if player_count > usize::from(new_options.max_players) {
+                            err = Some((
+                                "MAX_PLAYERS_TOO_LOW".into(),
+                                "max_players cannot be lower than the current player count".into(),
+                            ));
+                        } else {
+                            let team_capacity = usize::from(new_options.max_players / 2);
+                            let team_0 = m
+                                .players
+                                .iter()
+                                .filter(|p| p.team == TeamIdx::TEAM_0)
+                                .count();
+                            let team_1 = m
+                                .players
+                                .iter()
+                                .filter(|p| p.team == TeamIdx::TEAM_1)
+                                .count();
+
+                            if team_0 > team_capacity || team_1 > team_capacity {
+                                err = Some((
+                                    "TEAM_TOO_LARGE".into(),
+                                    "new max_players would evict an existing team".into(),
+                                ));
+                            } else if let Some(owner_idx) =
+                                m.players.iter().position(|p| p.key == owner_key)
+                            {
+                                let owner_team_idx = m
+                                    .players
+                                    .get(owner_idx)
+                                    .map(|p| p.team.as_u8())
+                                    .unwrap_or(0);
+
+                                let previous = m.options;
+                                if previous != new_options {
+                                    m.options = new_options;
+
+                                    let previous_json = serde_json::to_value(previous)
+                                        .unwrap_or_else(|_| {
+                                            serde_json::json!({
+                                                "error": "failed_to_serialize_previous_options"
+                                            })
+                                        });
+                                    let updated_json = serde_json::to_value(new_options)
+                                        .unwrap_or_else(|_| {
+                                            serde_json::json!({
+                                                "error": "failed_to_serialize_updated_options"
+                                            })
+                                        });
+
+                                    history_action = Some(GameHistoryEvent::GameAction {
+                                        match_id: msid.clone(),
+                                        actor_seat_idx: Some(
+                                            u8::try_from(owner_idx).unwrap_or_default(),
+                                        ),
+                                        actor_team_idx: Some(owner_team_idx),
+                                        actor_user_id,
+                                        ty: "match.options.set".into(),
+                                        data: serde_json::json!({
+                                            "previous": previous_json,
+                                            "updated": updated_json,
+                                            "server_time_ms": now_ms,
+                                        }),
+                                    });
+                                }
+                            } else {
+                                err = Some(("OWNER_NOT_FOUND".into(), "owner seat missing".into()));
+                            }
+                        }
+                    }
+                }
+
+                if let Some((code, msg)) = err {
+                    self.send_to(session_id, Self::err_out(id, code, msg)).await;
+                    return;
+                }
+
+                if let Some(ev) = history_action.take() {
+                    self.emit_history(ev);
+                }
+
+                let correlated = id.clone().map(|id| (session_id, id));
+                self.emit_match_update_to_match(&msid, correlated).await;
+                self.broadcast_lobby_match_upsert(&msid).await;
+            }
+
             C2sMessage::GamePlayCard(d) => {
                 let msid = d.match_id;
                 let card_idx = d.card_idx;
@@ -3332,7 +3493,7 @@ impl Realtime {
 mod e2e_smoke_tests {
     use super::*;
     use crate::history::GameHistoryEvent;
-    use crate::protocol::ws::v2::messages::{MatchKickData, MatchWatchData};
+    use crate::protocol::ws::v2::messages::{MatchKickData, MatchOptionsSetData, MatchWatchData};
     use crate::protocol::ws::v2::schema::GameCommand;
     use crate::protocol::ws::v2::{
         ChatSayData, GamePlayCardData, GameSayData, MatchCreateData, MatchJoinData, MatchReadyData,
@@ -4792,6 +4953,472 @@ mod e2e_smoke_tests {
 
         assert!(saw_pause, "expected match.pause history event");
         assert!(saw_resume, "expected match.resume history event");
+    }
+
+    #[tokio::test]
+    async fn owner_can_update_match_options_in_lobby() {
+        use tokio::time::{Duration, timeout};
+
+        let rt = Realtime::new();
+        let (owner, mut rx_owner) = add_session(&rt, 600).await;
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchCreate(MatchCreateData {
+                    name: "owner".into(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                    options: Some(MatchOptions {
+                        max_players: 6,
+                        match_points: 12,
+                        turn_time_ms: 30_000,
+                        ..MatchOptions::default()
+                    })
+                    .into(),
+                }),
+            },
+        )
+        .await;
+
+        let match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&owner)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("creator should be in a match")
+        };
+
+        drain_receiver(&mut rx_owner);
+
+        let updated_options = MatchOptions {
+            max_players: 4,
+            flor: false,
+            match_points: 12,
+            falta_envido: 1,
+            turn_time_ms: 45_000,
+            abandon_time_ms: 90_000,
+            reconnect_grace_ms: 2_500,
+        };
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Some("corr_set_options".into()).into(),
+                msg: C2sMessage::MatchOptionsSet(MatchOptionsSetData {
+                    match_id: match_id.clone(),
+                    options: updated_options,
+                }),
+            },
+        )
+        .await;
+
+        let msg = timeout(Duration::from_millis(250), rx_owner.recv())
+            .await
+            .expect("expected match update")
+            .expect("ws channel open");
+
+        assert_eq!(msg.id.0.as_deref(), Some("corr_set_options"));
+
+        match msg.msg {
+            S2cMessage::MatchUpdate(data) => {
+                assert_eq!(data.match_.options, updated_options);
+            }
+            other => panic!("expected match update; got {other:?}"),
+        }
+
+        {
+            let s = rt.state.lock().await;
+            let m = s.matches.get(&match_id).expect("match exists");
+            assert_eq!(m.options, updated_options);
+        }
+    }
+
+    #[tokio::test]
+    async fn match_options_set_rejects_non_owner_and_non_lobby() {
+        use tokio::time::{Duration, timeout};
+
+        let rt = Realtime::new();
+        let (owner, mut rx_owner) = add_session(&rt, 601).await;
+        let (player, mut rx_player) = add_session(&rt, 602).await;
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchCreate(MatchCreateData {
+                    name: "owner".into(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                    options: Some(MatchOptions {
+                        max_players: 6,
+                        match_points: 9,
+                        turn_time_ms: 30_000,
+                        ..MatchOptions::default()
+                    })
+                    .into(),
+                }),
+            },
+        )
+        .await;
+
+        let match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&owner)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("creator should be in a match")
+        };
+
+        rt.handle_message(
+            player,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchJoin(MatchJoinData {
+                    match_id: match_id.clone(),
+                    name: "player".into(),
+                    team: Some(TeamIdx::TEAM_1).into(),
+                }),
+            },
+        )
+        .await;
+
+        drain_receiver(&mut rx_owner);
+        drain_receiver(&mut rx_player);
+
+        let requested_options = MatchOptions {
+            max_players: 6,
+            match_points: 11,
+            turn_time_ms: 30_000,
+            ..MatchOptions::default()
+        };
+
+        rt.handle_message(
+            player,
+            WsInMessage {
+                v: Default::default(),
+                id: Some("corr_non_owner".into()).into(),
+                msg: C2sMessage::MatchOptionsSet(MatchOptionsSetData {
+                    match_id: match_id.clone(),
+                    options: requested_options,
+                }),
+            },
+        )
+        .await;
+
+        let msg = timeout(Duration::from_millis(250), rx_player.recv())
+            .await
+            .expect("expected error")
+            .expect("ws channel open");
+
+        assert_eq!(msg.id.0.as_deref(), Some("corr_non_owner"));
+
+        match msg.msg {
+            S2cMessage::Error(err) => assert_eq!(err.code, "NOT_OWNER"),
+            other => panic!("expected error; got {other:?}"),
+        }
+
+        for sid in [owner, player] {
+            rt.handle_message(
+                sid,
+                WsInMessage {
+                    v: Default::default(),
+                    id: Default::default(),
+                    msg: C2sMessage::MatchReady(MatchReadyData {
+                        match_id: match_id.clone(),
+                        ready: true,
+                    }),
+                },
+            )
+            .await;
+        }
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchStart(MatchRefData {
+                    match_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+
+        drain_receiver(&mut rx_owner);
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Some("corr_bad_state".into()).into(),
+                msg: C2sMessage::MatchOptionsSet(MatchOptionsSetData {
+                    match_id: match_id.clone(),
+                    options: requested_options,
+                }),
+            },
+        )
+        .await;
+
+        let msg = timeout(Duration::from_millis(250), rx_owner.recv())
+            .await
+            .expect("expected error")
+            .expect("ws channel open");
+
+        assert_eq!(msg.id.0.as_deref(), Some("corr_bad_state"));
+
+        match msg.msg {
+            S2cMessage::Error(err) => assert_eq!(err.code, "BAD_STATE"),
+            other => panic!("expected error; got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn match_options_set_validates_max_players_and_team_sizes() {
+        use tokio::time::{Duration, timeout};
+
+        let rt = Realtime::new();
+        let (owner, mut rx_owner) = add_session(&rt, 603).await;
+        let (p2, _rx_p2) = add_session(&rt, 604).await;
+        let (p3, _rx_p3) = add_session(&rt, 605).await;
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchCreate(MatchCreateData {
+                    name: "owner".into(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                    options: Some(MatchOptions {
+                        max_players: 6,
+                        match_points: 9,
+                        turn_time_ms: 30_000,
+                        ..MatchOptions::default()
+                    })
+                    .into(),
+                }),
+            },
+        )
+        .await;
+
+        let match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&owner)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("creator should be in a match")
+        };
+
+        for (session_id, name) in [(p2, "p2"), (p3, "p3")] {
+            rt.handle_message(
+                session_id,
+                WsInMessage {
+                    v: Default::default(),
+                    id: Default::default(),
+                    msg: C2sMessage::MatchJoin(MatchJoinData {
+                        match_id: match_id.clone(),
+                        name: name.to_string(),
+                        team: Some(TeamIdx::TEAM_0).into(),
+                    }),
+                },
+            )
+            .await;
+        }
+
+        drain_receiver(&mut rx_owner);
+
+        let too_small = MatchOptions {
+            max_players: 2,
+            ..MatchOptions::default()
+        };
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Some("corr_too_low".into()).into(),
+                msg: C2sMessage::MatchOptionsSet(MatchOptionsSetData {
+                    match_id: match_id.clone(),
+                    options: too_small,
+                }),
+            },
+        )
+        .await;
+
+        let msg = timeout(Duration::from_millis(250), rx_owner.recv())
+            .await
+            .expect("expected error")
+            .expect("ws channel open");
+
+        assert_eq!(msg.id.0.as_deref(), Some("corr_too_low"));
+
+        match msg.msg {
+            S2cMessage::Error(err) => assert_eq!(err.code, "MAX_PLAYERS_TOO_LOW"),
+            other => panic!("expected error; got {other:?}"),
+        }
+
+        drain_receiver(&mut rx_owner);
+
+        let too_many_on_team = MatchOptions {
+            max_players: 4,
+            ..MatchOptions::default()
+        };
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Some("corr_team_too_large".into()).into(),
+                msg: C2sMessage::MatchOptionsSet(MatchOptionsSetData {
+                    match_id: match_id.clone(),
+                    options: too_many_on_team,
+                }),
+            },
+        )
+        .await;
+
+        let msg = timeout(Duration::from_millis(250), rx_owner.recv())
+            .await
+            .expect("expected error")
+            .expect("ws channel open");
+
+        assert_eq!(msg.id.0.as_deref(), Some("corr_team_too_large"));
+
+        match msg.msg {
+            S2cMessage::Error(err) => assert_eq!(err.code, "TEAM_TOO_LARGE"),
+            other => panic!("expected error; got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn match_options_set_emits_history_event() {
+        use tokio::time::{Duration, timeout};
+
+        let (history_tx, mut history_rx) = tokio::sync::mpsc::unbounded_channel();
+        let rt = Realtime::new_with_history(history_tx);
+        let (owner, _rx_owner) = add_session(&rt, 700).await;
+        let (player, _rx_player) = add_session(&rt, 701).await;
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchCreate(MatchCreateData {
+                    name: "owner".into(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                    options: Some(MatchOptions {
+                        max_players: 6,
+                        match_points: 9,
+                        turn_time_ms: 30_000,
+                        ..MatchOptions::default()
+                    })
+                    .into(),
+                }),
+            },
+        )
+        .await;
+
+        let match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&owner)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("creator should be in a match")
+        };
+
+        rt.handle_message(
+            player,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchJoin(MatchJoinData {
+                    match_id: match_id.clone(),
+                    name: "player".into(),
+                    team: Some(TeamIdx::TEAM_1).into(),
+                }),
+            },
+        )
+        .await;
+
+        let updated_options = MatchOptions {
+            max_players: 4,
+            flor: false,
+            match_points: 11,
+            falta_envido: 1,
+            turn_time_ms: 45_000,
+            abandon_time_ms: 60_000,
+            reconnect_grace_ms: 3_000,
+        };
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchOptionsSet(MatchOptionsSetData {
+                    match_id: match_id.clone(),
+                    options: updated_options,
+                }),
+            },
+        )
+        .await;
+
+        let mut saw_event = false;
+        for _ in 0..40 {
+            let event = timeout(Duration::from_millis(250), history_rx.recv())
+                .await
+                .expect("history event")
+                .expect("history channel open");
+
+            if let GameHistoryEvent::GameAction {
+                ty,
+                actor_user_id,
+                actor_seat_idx,
+                actor_team_idx,
+                data,
+                ..
+            } = event
+            {
+                if ty == "match.options.set" {
+                    assert_eq!(actor_user_id, 700);
+                    assert_eq!(actor_seat_idx, Some(0));
+                    assert_eq!(actor_team_idx, Some(0));
+                    assert!(
+                        data.get("server_time_ms")
+                            .and_then(|v| v.as_i64())
+                            .is_some(),
+                        "server_time_ms missing"
+                    );
+
+                    let previous = data
+                        .get("previous")
+                        .and_then(|v| v.as_object())
+                        .expect("previous options payload");
+                    let updated = data
+                        .get("updated")
+                        .and_then(|v| v.as_object())
+                        .expect("updated options payload");
+
+                    assert_eq!(
+                        previous.get("max_players").and_then(|v| v.as_u64()),
+                        Some(6)
+                    );
+                    assert_eq!(updated.get("max_players").and_then(|v| v.as_u64()), Some(4));
+                    assert_eq!(previous.get("flor").and_then(|v| v.as_bool()), Some(true));
+                    assert_eq!(updated.get("flor").and_then(|v| v.as_bool()), Some(false));
+
+                    saw_event = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(saw_event, "expected match.options.set history event");
     }
 
     #[tokio::test]
