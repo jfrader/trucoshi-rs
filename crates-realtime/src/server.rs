@@ -3331,6 +3331,7 @@ impl Realtime {
 #[cfg(test)]
 mod e2e_smoke_tests {
     use super::*;
+    use crate::history::GameHistoryEvent;
     use crate::protocol::ws::v2::messages::{MatchKickData, MatchWatchData};
     use crate::protocol::ws::v2::schema::GameCommand;
     use crate::protocol::ws::v2::{
@@ -5512,6 +5513,94 @@ mod e2e_smoke_tests {
             .expect("expected BAD_STATE error");
         assert_eq!(err.code, "BAD_STATE");
     }
+
+    #[tokio::test]
+    async fn rematch_emits_history_events_for_new_match() {
+        use tokio::time::{Duration, timeout};
+
+        let (history_tx, mut history_rx) = tokio::sync::mpsc::unbounded_channel();
+        let rt = Realtime::new_with_history(history_tx);
+        let (owner, _rx_owner) = add_session(&rt, 930).await;
+        let (player, _rx_player) = add_session(&rt, 931).await;
+
+        let old_match_id = run_match_to_completion(&rt, owner, player).await;
+
+        while history_rx.try_recv().is_ok() {}
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchRematch(MatchRefData {
+                    match_id: old_match_id.clone(),
+                }),
+            },
+        )
+        .await;
+
+        let new_match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&owner)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("owner should move to new match")
+        };
+
+        let mut saw_rematch = false;
+        let mut saw_match_created = false;
+        let mut new_match_join_events = 0;
+
+        for _ in 0..50 {
+            let event = timeout(Duration::from_millis(500), history_rx.recv())
+                .await
+                .expect("expected history event during rematch")
+                .expect("history channel open");
+
+            match event {
+                GameHistoryEvent::GameAction {
+                    match_id, ty, data, ..
+                } if ty == "match.rematch" && match_id == old_match_id => {
+                    assert_eq!(
+                        data.get("new_match_id").and_then(|v| v.as_str()),
+                        Some(new_match_id.as_str())
+                    );
+                    assert_eq!(data.get("player_count").and_then(|v| v.as_u64()), Some(2));
+                    saw_rematch = true;
+                }
+                GameHistoryEvent::MatchCreated {
+                    match_id, owner, ..
+                } if match_id == new_match_id => {
+                    assert_eq!(owner.display_name, "p1");
+                    saw_match_created = true;
+                }
+                GameHistoryEvent::PlayerJoined {
+                    match_id,
+                    display_name,
+                    ..
+                } if match_id == new_match_id => {
+                    assert_eq!(display_name, "p2");
+                    new_match_join_events += 1;
+                }
+                _ => {}
+            }
+
+            if saw_rematch && saw_match_created && new_match_join_events == 1 {
+                break;
+            }
+        }
+
+        assert!(saw_rematch, "expected match.rematch history event");
+        assert!(
+            saw_match_created,
+            "expected MatchCreated event for new lobby"
+        );
+        assert_eq!(
+            new_match_join_events, 1,
+            "expected second player to emit a PlayerJoined event"
+        );
+    }
+
     #[tokio::test]
     async fn list_active_matches_includes_lobby_entries_and_skips_finished() {
         let rt = Realtime::new();
