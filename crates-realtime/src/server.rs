@@ -2104,7 +2104,8 @@ impl Realtime {
                     return;
                 }
 
-                let mut target: Option<(String, i64, Option<Uuid>)> = None;
+                let mut owner_meta: Option<(u8, u8, i64)> = None;
+                let mut target: Option<(String, i64, Option<Uuid>, u8, u8, String)> = None;
                 let mut err: Option<(String, String)> = None;
                 {
                     let s = self.state.lock().await;
@@ -2124,15 +2125,35 @@ impl Realtime {
                     } else if target_seat >= m.players.len() {
                         err = Some(("PLAYER_NOT_FOUND".into(), "seat not found".into()));
                     } else {
-                        let player = m.players[target_seat].clone();
-                        if player.key == owner_key {
-                            err = Some(("BAD_REQUEST".into(), "cannot kick yourself".into()));
+                        if let Some(owner_idx) = m.players.iter().position(|p| p.key == owner_key) {
+                            let owner_player = &m.players[owner_idx];
+                            owner_meta = Some((
+                                u8::try_from(owner_idx).unwrap_or(0),
+                                owner_player.team.as_u8(),
+                                owner_player.user_id,
+                            ));
                         } else {
-                            let session_id = s.sessions.iter().find_map(|(sid, sess)| {
-                                (sess.player_key.as_deref() == Some(player.key.as_str()))
-                                    .then_some(*sid)
-                            });
-                            target = Some((player.key.clone(), player.user_id, session_id));
+                            err = Some(("OWNER_NOT_FOUND".into(), "owner seat missing".into()));
+                        }
+
+                        if err.is_none() {
+                            let player = m.players[target_seat].clone();
+                            if player.key == owner_key {
+                                err = Some(("BAD_REQUEST".into(), "cannot kick yourself".into()));
+                            } else {
+                                let session_id = s.sessions.iter().find_map(|(sid, sess)| {
+                                    (sess.player_key.as_deref() == Some(player.key.as_str()))
+                                        .then_some(*sid)
+                                });
+                                target = Some((
+                                    player.key.clone(),
+                                    player.user_id,
+                                    session_id,
+                                    u8::try_from(target_seat).unwrap_or(0),
+                                    player.team.as_u8(),
+                                    player.name.clone(),
+                                ));
+                            }
                         }
                     }
                 }
@@ -2142,7 +2163,15 @@ impl Realtime {
                     return;
                 }
 
-                let Some((target_key, target_user_id, target_session)) = target else {
+                let Some((
+                    target_key,
+                    target_user_id,
+                    target_session,
+                    target_seat_idx,
+                    target_team_idx,
+                    target_display_name,
+                )) = target
+                else {
                     self.send_to(
                         session_id,
                         Self::err_out(id, "PLAYER_NOT_FOUND", "seat not found"),
@@ -2150,6 +2179,17 @@ impl Realtime {
                     .await;
                     return;
                 };
+
+                let Some((owner_seat_idx, owner_team_idx, owner_user_id)) = owner_meta else {
+                    self.send_to(
+                        session_id,
+                        Self::err_out(id, "OWNER_NOT_FOUND", "owner seat missing"),
+                    )
+                    .await;
+                    return;
+                };
+
+                let now_ms = Self::now_ms();
 
                 let sid = target_session.unwrap_or_else(Uuid::nil);
                 let removed = self
@@ -2175,6 +2215,23 @@ impl Realtime {
                     )
                     .await;
                 }
+
+                self.emit_history(GameHistoryEvent::GameAction {
+                    match_id: msid.clone(),
+                    actor_seat_idx: Some(owner_seat_idx),
+                    actor_team_idx: Some(owner_team_idx),
+                    actor_user_id: owner_user_id,
+                    ty: "match.kick".into(),
+                    data: serde_json::json!({
+                        "target_seat_idx": target_seat_idx,
+                        "target_team_idx": target_team_idx,
+                        "target_user_id": target_user_id,
+                        "target_display_name": target_display_name,
+                        "reason": "owner_kick",
+                        "trigger": "owner_request",
+                        "server_time_ms": now_ms,
+                    }),
+                });
             }
 
             C2sMessage::ChatJoin(d) => {
@@ -2903,6 +2960,9 @@ impl Realtime {
             match_id: String,
             player_key: String,
             user_id: i64,
+            seat_idx: u8,
+            team_idx: u8,
+            display_name: String,
             session_id: Option<Uuid>,
             reason: String,
         }
@@ -2916,7 +2976,8 @@ impl Realtime {
                 let abandon_ms = m.options.abandon_time_ms.max(1);
                 let lobby_deadline = abandon_ms.saturating_add(m.options.reconnect_grace_ms.max(1));
 
-                for player in &m.players {
+                for (idx, player) in m.players.iter().enumerate() {
+                    let seat_idx = u8::try_from(idx).unwrap_or(0);
                     if let Some(disconnected_at) = player.disconnected_at_ms {
                         if now.saturating_sub(disconnected_at) >= abandon_ms {
                             let session_id = s.sessions.iter().find_map(|(sid, sess)| {
@@ -2927,6 +2988,9 @@ impl Realtime {
                                 match_id: match_id.clone(),
                                 player_key: player.key.clone(),
                                 user_id: player.user_id,
+                                seat_idx,
+                                team_idx: player.team.as_u8(),
+                                display_name: player.name.clone(),
                                 session_id,
                                 reason: "disconnect_timeout".into(),
                             });
@@ -2946,6 +3010,9 @@ impl Realtime {
                             match_id: match_id.clone(),
                             player_key: player.key.clone(),
                             user_id: player.user_id,
+                            seat_idx,
+                            team_idx: player.team.as_u8(),
+                            display_name: player.name.clone(),
                             session_id,
                             reason: "lobby_inactivity".into(),
                         });
@@ -2955,35 +3022,61 @@ impl Realtime {
         }
 
         for removal in removals {
-            if let Some(sid) = removal.session_id {
+            let PendingRemoval {
+                match_id,
+                player_key,
+                user_id,
+                seat_idx,
+                team_idx,
+                display_name,
+                session_id,
+                reason,
+            } = removal;
+
+            let removal_sid = if let Some(sid) = session_id {
                 self.send_to(
                     sid,
                     WsOutMessage {
                         v: Default::default(),
                         msg: S2cMessage::MatchKicked(MatchKickedData {
-                            match_id: removal.match_id.clone(),
-                            reason: removal.reason.clone(),
+                            match_id: match_id.clone(),
+                            reason: reason.clone(),
                         }),
                         id: Default::default(),
                     },
                 )
                 .await;
-            }
-
-            let sid = removal.session_id.unwrap_or_else(Uuid::nil);
-            let removed = self
-                .leave_match_internal(
-                    sid,
-                    &removal.match_id,
-                    &removal.player_key,
-                    removal.user_id,
-                    &removal.reason,
-                )
-                .await;
-            if removed {
-                self.broadcast_lobby_match_remove(&removal.match_id).await;
+                sid
             } else {
-                self.broadcast_lobby_match_upsert(&removal.match_id).await;
+                Uuid::nil()
+            };
+
+            let removed = self
+                .leave_match_internal(removal_sid, &match_id, &player_key, user_id, &reason)
+                .await;
+
+            let event_time = Self::now_ms();
+            self.emit_history(GameHistoryEvent::GameAction {
+                match_id: match_id.clone(),
+                actor_seat_idx: None,
+                actor_team_idx: None,
+                actor_user_id: 0,
+                ty: "match.kick".into(),
+                data: serde_json::json!({
+                    "target_seat_idx": seat_idx,
+                    "target_team_idx": team_idx,
+                    "target_user_id": user_id,
+                    "target_display_name": display_name,
+                    "reason": reason,
+                    "trigger": "sweep",
+                    "server_time_ms": event_time,
+                }),
+            });
+
+            if removed {
+                self.broadcast_lobby_match_remove(&match_id).await;
+            } else {
+                self.broadcast_lobby_match_upsert(&match_id).await;
             }
         }
     }
@@ -4292,6 +4385,114 @@ mod e2e_smoke_tests {
     }
 
     #[tokio::test]
+    async fn owner_kick_emits_history_event() {
+        use crate::history::GameHistoryEvent;
+        use tokio::time::{Duration, timeout};
+
+        let (history_tx, mut history_rx) = tokio::sync::mpsc::unbounded_channel();
+        let rt = Realtime::new_with_history(history_tx);
+        let (owner, _rx_owner) = add_session(&rt, 500).await;
+        let (target, mut rx_target) = add_session(&rt, 501).await;
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchCreate(MatchCreateData {
+                    name: "owner".into(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                    options: Some(MatchOptions {
+                        max_players: 2,
+                        match_points: 1,
+                        turn_time_ms: 30_000,
+                        ..MatchOptions::default()
+                    })
+                    .into(),
+                }),
+            },
+        )
+        .await;
+
+        let match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&owner)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("creator should be in a match")
+        };
+
+        rt.handle_message(
+            target,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchJoin(MatchJoinData {
+                    match_id: match_id.clone(),
+                    name: "target".into(),
+                    team: Some(TeamIdx::TEAM_1).into(),
+                }),
+            },
+        )
+        .await;
+
+        drain_receiver(&mut rx_target);
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchKick(MatchKickData {
+                    match_id: match_id.clone(),
+                    seat_idx: 1,
+                }),
+            },
+        )
+        .await;
+
+        let mut saw_kick = false;
+        for _ in 0..20 {
+            let event = timeout(Duration::from_millis(250), history_rx.recv())
+                .await
+                .expect("history channel event")
+                .expect("history channel open");
+
+            if let GameHistoryEvent::GameAction {
+                ty,
+                actor_user_id,
+                actor_seat_idx,
+                actor_team_idx,
+                data,
+                ..
+            } = event
+            {
+                if ty == "match.kick" {
+                    assert_eq!(actor_user_id, 500);
+                    assert_eq!(actor_seat_idx, Some(0));
+                    assert_eq!(actor_team_idx, Some(0));
+                    assert_eq!(
+                        data.get("reason").and_then(|v| v.as_str()),
+                        Some("owner_kick")
+                    );
+                    assert_eq!(
+                        data.get("trigger").and_then(|v| v.as_str()),
+                        Some("owner_request")
+                    );
+                    assert_eq!(
+                        data.get("target_user_id").and_then(|v| v.as_i64()),
+                        Some(501)
+                    );
+                    saw_kick = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(saw_kick, "expected match.kick history event");
+    }
+
+    #[tokio::test]
     async fn player_can_reconnect_after_disconnect() {
         use tokio::time::{Duration, timeout};
 
@@ -4489,6 +4690,108 @@ mod e2e_smoke_tests {
             let m = s.matches.get(&match_id).expect("match exists");
             assert_eq!(m.players.len(), 1, "sweeper should remove inactive player");
         }
+    }
+
+    #[tokio::test]
+    async fn sweep_kick_emits_history_event() {
+        use crate::history::GameHistoryEvent;
+        use tokio::time::{Duration, timeout};
+
+        let (history_tx, mut history_rx) = tokio::sync::mpsc::unbounded_channel();
+        let rt = Realtime::new_with_history(history_tx);
+        let (owner, _rx_owner) = add_session(&rt, 520).await;
+        let (target, _rx_target) = add_session(&rt, 521).await;
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchCreate(MatchCreateData {
+                    name: "owner".into(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                    options: Some(MatchOptions {
+                        max_players: 2,
+                        match_points: 1,
+                        turn_time_ms: 30_000,
+                        abandon_time_ms: 10,
+                        reconnect_grace_ms: 5,
+                        ..MatchOptions::default()
+                    })
+                    .into(),
+                }),
+            },
+        )
+        .await;
+
+        let match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&owner)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("creator should be in a match")
+        };
+
+        rt.handle_message(
+            target,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchJoin(MatchJoinData {
+                    match_id: match_id.clone(),
+                    name: "target".into(),
+                    team: Some(TeamIdx::TEAM_1).into(),
+                }),
+            },
+        )
+        .await;
+
+        {
+            let mut s = rt.state.lock().await;
+            let m = s.matches.get_mut(&match_id).expect("match exists");
+            if let Some(p) = m.players.iter_mut().find(|p| p.user_id == 521) {
+                p.disconnected_at_ms = Some(0);
+            }
+        }
+
+        rt.sweep_inactive_players().await;
+
+        let mut saw_kick = false;
+        for _ in 0..20 {
+            let event = timeout(Duration::from_millis(250), history_rx.recv())
+                .await
+                .expect("history channel event")
+                .expect("history channel open");
+
+            if let GameHistoryEvent::GameAction {
+                ty,
+                actor_user_id,
+                actor_seat_idx,
+                actor_team_idx,
+                data,
+                ..
+            } = event
+            {
+                if ty == "match.kick" {
+                    assert_eq!(actor_user_id, 0);
+                    assert!(actor_seat_idx.is_none());
+                    assert!(actor_team_idx.is_none());
+                    assert_eq!(
+                        data.get("reason").and_then(|v| v.as_str()),
+                        Some("disconnect_timeout")
+                    );
+                    assert_eq!(data.get("trigger").and_then(|v| v.as_str()), Some("sweep"));
+                    assert_eq!(
+                        data.get("target_user_id").and_then(|v| v.as_i64()),
+                        Some(521)
+                    );
+                    saw_kick = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(saw_kick, "expected sweep match.kick history event");
     }
 
     #[tokio::test]
