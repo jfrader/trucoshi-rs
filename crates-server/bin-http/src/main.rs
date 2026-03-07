@@ -8,7 +8,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use headers::{Authorization, HeaderMapExt, authorization::Bearer};
 use serde::{Deserialize, Serialize};
-use std::{net::SocketAddr, sync::Arc};
+use std::{convert::TryFrom, net::SocketAddr, sync::Arc};
 use time::{Duration, OffsetDateTime};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -148,6 +148,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/tournaments/{id}/open", post(open_tournament))
         .route("/v1/tournaments/{id}/cancel", post(cancel_tournament))
         .route("/v1/history/matches/{id}", get(get_match_history))
+        .route("/v1/stats/players/{id}", get(get_player_profile))
+        .route("/v1/stats/leaderboard", get(get_leaderboard))
         .route("/v1/auth/twitter", get(twitter_start))
         .route("/v1/auth/twitter/callback", get(twitter_callback))
         .layer(TraceLayer::new_for_http())
@@ -926,6 +928,312 @@ async fn get_match_history(
     }))
 }
 
+// ===== Player stats =====
+
+#[derive(Debug, Deserialize)]
+struct PlayerProfileQuery {
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct PlayerProfileUserDto {
+    id: i64,
+    name: String,
+    avatar_url: Option<String>,
+    twitter_handle: Option<String>,
+    created_at: OffsetDateTime,
+}
+
+#[derive(Debug, Serialize)]
+struct PlayerTotalsDto {
+    matches_played: i64,
+    matches_finished: i64,
+    matches_won: i64,
+    win_rate: f64,
+    points_for: i64,
+    points_against: i64,
+    points_diff: i64,
+    last_played_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Serialize)]
+struct PlayerMatchDto {
+    match_id: i64,
+    ws_match_id: Option<String>,
+    created_at: OffsetDateTime,
+    finished_at: Option<OffsetDateTime>,
+    seat_idx: i32,
+    team_idx: i32,
+    match_options: Option<serde_json::Value>,
+    team_points: Option<Vec<i64>>,
+    points_for: Option<i64>,
+    points_against: Option<i64>,
+    finish_reason: Option<String>,
+    outcome: PlayerMatchOutcome,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PlayerMatchOutcome {
+    Win,
+    Loss,
+    InProgress,
+}
+
+#[derive(Debug, Serialize)]
+struct PlayerProfileResponse {
+    user: PlayerProfileUserDto,
+    totals: PlayerTotalsDto,
+    recent_matches: Vec<PlayerMatchDto>,
+    next_offset: Option<i64>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct PlayerProfileUserRow {
+    id: i64,
+    name: String,
+    avatar_url: Option<String>,
+    twitter_handle: Option<String>,
+    created_at: OffsetDateTime,
+}
+
+async fn get_player_profile(
+    State(state): State<Arc<AppState>>,
+    Path(user_id): Path<i64>,
+    Query(q): Query<PlayerProfileQuery>,
+) -> Result<Json<PlayerProfileResponse>, ApiError> {
+    let limit = q.limit.unwrap_or(20).clamp(1, 50);
+    let offset = q.offset.unwrap_or(0).max(0);
+
+    let profile = sqlx::query_as::<_, PlayerProfileUserRow>(
+        r#"
+        SELECT id, name, avatar_url, twitter_handle, created_at
+        FROM users
+        WHERE id = $1
+        "#,
+    )
+    .bind(user_id)
+    .fetch_optional(&state.store.pool)
+    .await
+    .map_err(ApiError::internal)?
+    .ok_or_else(|| ApiError::not_found("user not found"))?;
+
+    let totals = state
+        .store
+        .gh_player_aggregates(user_id)
+        .await
+        .map_err(ApiError::internal)?;
+
+    let limit_plus_one = limit + 1;
+    let mut matches = state
+        .store
+        .gh_list_player_matches(user_id, limit_plus_one, offset)
+        .await
+        .map_err(ApiError::internal)?;
+
+    let has_more = (matches.len() as i64) > limit;
+    if has_more {
+        let keep = usize::try_from(limit).unwrap_or(matches.len());
+        if matches.len() > keep {
+            matches.truncate(keep);
+        }
+    }
+
+    let recent_matches = matches
+        .into_iter()
+        .map(player_match_to_dto)
+        .collect::<Vec<_>>();
+
+    let next_offset = if has_more { Some(offset + limit) } else { None };
+
+    let win_rate = if totals.matches_finished > 0 {
+        (totals.matches_won as f64) / (totals.matches_finished as f64)
+    } else {
+        0.0
+    };
+
+    let totals_dto = PlayerTotalsDto {
+        matches_played: totals.matches_played,
+        matches_finished: totals.matches_finished,
+        matches_won: totals.matches_won,
+        win_rate,
+        points_for: totals.points_for,
+        points_against: totals.points_against,
+        points_diff: totals.points_for - totals.points_against,
+        last_played_at: totals.last_played_at,
+    };
+
+    Ok(Json(PlayerProfileResponse {
+        user: PlayerProfileUserDto {
+            id: profile.id,
+            name: profile.name,
+            avatar_url: profile.avatar_url,
+            twitter_handle: profile.twitter_handle,
+            created_at: profile.created_at,
+        },
+        totals: totals_dto,
+        recent_matches,
+        next_offset,
+    }))
+}
+
+fn player_match_to_dto(row: trucoshi_store::game_history::PlayerMatchRow) -> PlayerMatchDto {
+    let match_options = row.options.get("match_options").cloned();
+    let ws_match_id = row
+        .options
+        .get("ws_match_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let team_points = row.finish_data.as_ref().and_then(parse_team_points);
+
+    let finish_reason = row
+        .finish_data
+        .as_ref()
+        .and_then(|data| data.get("reason"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let (points_for, points_against, outcome) = if let Some(ref points) = team_points {
+        if let Some((pf, pa, outcome)) = points_summary(points, row.team_idx) {
+            (Some(pf), Some(pa), outcome)
+        } else {
+            (None, None, PlayerMatchOutcome::InProgress)
+        }
+    } else {
+        (None, None, PlayerMatchOutcome::InProgress)
+    };
+
+    PlayerMatchDto {
+        match_id: row.match_id,
+        ws_match_id,
+        created_at: row.created_at,
+        finished_at: row.finished_at,
+        seat_idx: row.seat_idx,
+        team_idx: row.team_idx,
+        match_options,
+        team_points,
+        points_for,
+        points_against,
+        finish_reason,
+        outcome,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LeaderboardQuery {
+    limit: Option<i64>,
+    offset: Option<i64>,
+    min_finished: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct LeaderboardEntryDto {
+    rank: i64,
+    user_id: i64,
+    name: String,
+    avatar_url: Option<String>,
+    twitter_handle: Option<String>,
+    matches_played: i64,
+    matches_finished: i64,
+    matches_won: i64,
+    win_rate: f64,
+    points_for: i64,
+    points_against: i64,
+    points_diff: i64,
+    last_played_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Serialize)]
+struct LeaderboardResponse {
+    entries: Vec<LeaderboardEntryDto>,
+    next_offset: Option<i64>,
+}
+
+async fn get_leaderboard(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<LeaderboardQuery>,
+) -> Result<Json<LeaderboardResponse>, ApiError> {
+    let limit = q.limit.unwrap_or(25).clamp(1, 100);
+    let offset = q.offset.unwrap_or(0).max(0);
+    let min_finished = q.min_finished.unwrap_or(5).max(0);
+
+    let limit_plus_one = limit + 1;
+    let mut rows = state
+        .store
+        .gh_leaderboard(min_finished, limit_plus_one, offset)
+        .await
+        .map_err(ApiError::internal)?;
+
+    let has_more = (rows.len() as i64) > limit;
+    if has_more {
+        let keep = usize::try_from(limit).unwrap_or(rows.len());
+        if rows.len() > keep {
+            rows.truncate(keep);
+        }
+    }
+
+    let entries = rows
+        .into_iter()
+        .enumerate()
+        .map(|(idx, row)| {
+            let win_rate = if row.matches_finished > 0 {
+                (row.matches_won as f64) / (row.matches_finished as f64)
+            } else {
+                0.0
+            };
+
+            LeaderboardEntryDto {
+                rank: offset + idx as i64 + 1,
+                user_id: row.user_id,
+                name: row.name,
+                avatar_url: row.avatar_url,
+                twitter_handle: row.twitter_handle,
+                matches_played: row.matches_played,
+                matches_finished: row.matches_finished,
+                matches_won: row.matches_won,
+                win_rate,
+                points_for: row.points_for,
+                points_against: row.points_against,
+                points_diff: row.points_for - row.points_against,
+                last_played_at: row.last_played_at,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let next_offset = if has_more { Some(offset + limit) } else { None };
+
+    Ok(Json(LeaderboardResponse {
+        entries,
+        next_offset,
+    }))
+}
+
+fn parse_team_points(value: &serde_json::Value) -> Option<Vec<i64>> {
+    let arr = value.get("team_points")?.as_array()?;
+    let mut out = Vec::with_capacity(arr.len());
+    for v in arr {
+        out.push(v.as_i64()?);
+    }
+    Some(out)
+}
+
+fn points_summary(team_points: &[i64], team_idx: i32) -> Option<(i64, i64, PlayerMatchOutcome)> {
+    let idx = usize::try_from(team_idx).ok()?;
+    let points_for = *team_points.get(idx)?;
+    let total: i64 = team_points.iter().sum();
+    let points_against = total - points_for;
+    let best = team_points.iter().copied().max().unwrap_or(points_for);
+    let outcome = if points_for == best {
+        PlayerMatchOutcome::Win
+    } else {
+        PlayerMatchOutcome::Loss
+    };
+
+    Some((points_for, points_against, outcome))
+}
+
 // ===== Twitter (placeholders) =====
 
 async fn twitter_start(State(state): State<Arc<AppState>>) -> Result<Response, ApiError> {
@@ -1137,5 +1445,299 @@ mod tests {
             .unwrap();
 
         assert_eq!(res.status(), StatusCode::OK);
+    }
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn player_profile_endpoint_returns_stats(pool: sqlx::PgPool) -> anyhow::Result<()> {
+        let store = trucoshi_store::Store { pool };
+
+        let alice_id: i64 = sqlx::query_scalar(
+            "INSERT INTO users (email, password_hash, name) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind("alice@example.com")
+        .bind("hash")
+        .bind("Alice")
+        .fetch_one(&store.pool)
+        .await?;
+
+        let bob_id: i64 = sqlx::query_scalar(
+            "INSERT INTO users (email, password_hash, name) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind("bob@example.com")
+        .bind("hash")
+        .bind("Bob")
+        .fetch_one(&store.pool)
+        .await?;
+
+        // Alice wins match A
+        let match_a = store
+            .gh_create_match(
+                Some("0.2.0"),
+                Some(2),
+                Some(11),
+                &json!({ "ws_match_id": "match-a", "match_options": { "max_players": 4 } }),
+            )
+            .await?;
+        store
+            .gh_add_player(match_a, 0, 0, Some(alice_id), "Alice")
+            .await?;
+        store
+            .gh_add_player(match_a, 1, 1, Some(bob_id), "Bob")
+            .await?;
+        store
+            .gh_append_event(
+                match_a,
+                0,
+                None,
+                None,
+                "match.finish",
+                &json!({ "team_points": [30, 10], "reason": "score_reached" }),
+            )
+            .await?;
+        store.gh_finish_match(match_a).await?;
+
+        // Bob wins match B
+        let match_b = store
+            .gh_create_match(
+                Some("0.2.0"),
+                Some(2),
+                Some(22),
+                &json!({ "ws_match_id": "match-b", "match_options": { "max_players": 4 } }),
+            )
+            .await?;
+        store
+            .gh_add_player(match_b, 0, 0, Some(alice_id), "Alice")
+            .await?;
+        store
+            .gh_add_player(match_b, 1, 1, Some(bob_id), "Bob")
+            .await?;
+        store
+            .gh_append_event(
+                match_b,
+                0,
+                None,
+                None,
+                "match.finish",
+                &json!({ "team_points": [12, 30], "reason": "score_reached" }),
+            )
+            .await?;
+        store.gh_finish_match(match_b).await?;
+
+        let state = Arc::new(AppState {
+            store: store.clone(),
+            tokens: trucoshi_auth::tokens::TokenConfig {
+                issuer: "test".into(),
+                audience: "test".into(),
+                access_ttl: Duration::minutes(5),
+                refresh_ttl: Duration::minutes(5),
+                jwt_hs256_secret: vec![0; 32],
+            },
+            cookie: CookieConfig {
+                refresh_cookie_name: "refresh".into(),
+                refresh_cookie_path: "/v1/auth/refresh-tokens".into(),
+                secure: false,
+                same_site: SameSite::Lax,
+            },
+            twitter: TwitterConfig {
+                public_base_url: "http://localhost".into(),
+                client_id: "id".into(),
+                client_secret: "secret".into(),
+            },
+            realtime: trucoshi_realtime::server::Realtime::new(),
+        });
+
+        let app = Router::new()
+            .route("/v1/stats/players/{id}", get(get_player_profile))
+            .with_state(state);
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/stats/players/{}?limit=1", alice_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["user"]["name"], serde_json::json!("Alice"));
+        assert_eq!(payload["totals"]["matches_played"], serde_json::json!(2));
+        assert_eq!(payload["totals"]["matches_won"], serde_json::json!(1));
+        assert_eq!(payload["recent_matches"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["next_offset"], serde_json::json!(1));
+        assert_eq!(
+            payload["recent_matches"][0]["ws_match_id"],
+            serde_json::json!("match-b")
+        );
+        assert_eq!(
+            payload["recent_matches"][0]["outcome"],
+            serde_json::json!("loss")
+        );
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn leaderboard_endpoint_orders_by_wins(pool: sqlx::PgPool) -> anyhow::Result<()> {
+        let store = trucoshi_store::Store { pool };
+
+        let alice_id: i64 = sqlx::query_scalar(
+            "INSERT INTO users (email, password_hash, name) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind("alice@example.com")
+        .bind("hash")
+        .bind("Alice")
+        .fetch_one(&store.pool)
+        .await?;
+
+        let bob_id: i64 = sqlx::query_scalar(
+            "INSERT INTO users (email, password_hash, name) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind("bob@example.com")
+        .bind("hash")
+        .bind("Bob")
+        .fetch_one(&store.pool)
+        .await?;
+
+        let carol_id: i64 = sqlx::query_scalar(
+            "INSERT INTO users (email, password_hash, name) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind("carol@example.com")
+        .bind("hash")
+        .bind("Carol")
+        .fetch_one(&store.pool)
+        .await?;
+
+        // Match 1: Alice beats Bob
+        let match1 = store
+            .gh_create_match(
+                Some("0.2.0"),
+                Some(2),
+                Some(33),
+                &json!({ "ws_match_id": "m1" }),
+            )
+            .await?;
+        store
+            .gh_add_player(match1, 0, 0, Some(alice_id), "Alice")
+            .await?;
+        store
+            .gh_add_player(match1, 1, 1, Some(bob_id), "Bob")
+            .await?;
+        store
+            .gh_append_event(
+                match1,
+                0,
+                None,
+                None,
+                "match.finish",
+                &json!({ "team_points": [30, 20], "reason": "score" }),
+            )
+            .await?;
+        store.gh_finish_match(match1).await?;
+
+        // Match 2: Bob beats Alice
+        let match2 = store
+            .gh_create_match(
+                Some("0.2.0"),
+                Some(2),
+                Some(44),
+                &json!({ "ws_match_id": "m2" }),
+            )
+            .await?;
+        store
+            .gh_add_player(match2, 0, 0, Some(alice_id), "Alice")
+            .await?;
+        store
+            .gh_add_player(match2, 1, 1, Some(bob_id), "Bob")
+            .await?;
+        store
+            .gh_append_event(
+                match2,
+                0,
+                None,
+                None,
+                "match.finish",
+                &json!({ "team_points": [10, 30], "reason": "score" }),
+            )
+            .await?;
+        store.gh_finish_match(match2).await?;
+
+        // Match 3: Bob beats Carol
+        let match3 = store
+            .gh_create_match(
+                Some("0.2.0"),
+                Some(2),
+                Some(55),
+                &json!({ "ws_match_id": "m3" }),
+            )
+            .await?;
+        store
+            .gh_add_player(match3, 0, 0, Some(bob_id), "Bob")
+            .await?;
+        store
+            .gh_add_player(match3, 1, 1, Some(carol_id), "Carol")
+            .await?;
+        store
+            .gh_append_event(
+                match3,
+                0,
+                None,
+                None,
+                "match.finish",
+                &json!({ "team_points": [30, 12], "reason": "score" }),
+            )
+            .await?;
+        store.gh_finish_match(match3).await?;
+
+        let state = Arc::new(AppState {
+            store: store.clone(),
+            tokens: trucoshi_auth::tokens::TokenConfig {
+                issuer: "test".into(),
+                audience: "test".into(),
+                access_ttl: Duration::minutes(5),
+                refresh_ttl: Duration::minutes(5),
+                jwt_hs256_secret: vec![0; 32],
+            },
+            cookie: CookieConfig {
+                refresh_cookie_name: "refresh".into(),
+                refresh_cookie_path: "/v1/auth/refresh-tokens".into(),
+                secure: false,
+                same_site: SameSite::Lax,
+            },
+            twitter: TwitterConfig {
+                public_base_url: "http://localhost".into(),
+                client_id: "id".into(),
+                client_secret: "secret".into(),
+            },
+            realtime: trucoshi_realtime::server::Realtime::new(),
+        });
+
+        let app = Router::new()
+            .route("/v1/stats/leaderboard", get(get_leaderboard))
+            .with_state(state);
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/stats/leaderboard?limit=2&min_finished=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let entries = payload["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["user_id"], serde_json::json!(bob_id));
+        assert_eq!(entries[0]["rank"], serde_json::json!(1));
+        assert_eq!(entries[1]["user_id"], serde_json::json!(alice_id));
+        assert_eq!(payload["next_offset"], serde_json::json!(2));
+
+        Ok(())
     }
 }
