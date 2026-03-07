@@ -4,13 +4,16 @@
 //!
 //! This is intentionally append-only to support analytics / ML training.
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 #[serde()]
 pub struct GameMatch {
     pub id: i64,
+    pub ws_match_id: Uuid,
     pub created_at: OffsetDateTime,
     pub finished_at: Option<OffsetDateTime>,
     pub server_version: Option<String>,
@@ -47,6 +50,7 @@ pub struct GameMatchEvent {
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct PlayerMatchRow {
     pub match_id: i64,
+    pub ws_match_id: Uuid,
     pub created_at: OffsetDateTime,
     pub finished_at: Option<OffsetDateTime>,
     pub options: serde_json::Value,
@@ -83,18 +87,23 @@ impl crate::Store {
     /// Insert a new `game_matches` row and return the DB match id.
     pub async fn gh_create_match(
         &self,
+        ws_match_id: &str,
         server_version: Option<&str>,
         protocol_version: Option<i32>,
         rng_seed: Option<i64>,
         options: &serde_json::Value,
     ) -> anyhow::Result<i64> {
+        let ws_match_id =
+            Uuid::parse_str(ws_match_id).context("invalid ws_match_id (expected UUID)")?;
+
         let id: i64 = sqlx::query_scalar(
             r#"
-            INSERT INTO game_matches (server_version, protocol_version, rng_seed, options)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO game_matches (ws_match_id, server_version, protocol_version, rng_seed, options)
+            VALUES ($1, $2, $3, $4, $5)
             RETURNING id
             "#,
         )
+        .bind(ws_match_id)
         .bind(server_version)
         .bind(protocol_version)
         .bind(rng_seed)
@@ -179,12 +188,30 @@ impl crate::Store {
     pub async fn gh_get_match(&self, match_id: i64) -> anyhow::Result<Option<GameMatch>> {
         let rec = sqlx::query_as::<_, GameMatch>(
             r#"
-            SELECT id, created_at, finished_at, server_version, protocol_version, rng_seed, options
+            SELECT id, ws_match_id, created_at, finished_at, server_version, protocol_version, rng_seed, options
             FROM game_matches
             WHERE id = $1
             "#,
         )
         .bind(match_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(rec)
+    }
+
+    pub async fn gh_get_match_by_ws_id(
+        &self,
+        ws_match_id: Uuid,
+    ) -> anyhow::Result<Option<GameMatch>> {
+        let rec = sqlx::query_as::<_, GameMatch>(
+            r#"
+            SELECT id, ws_match_id, created_at, finished_at, server_version, protocol_version, rng_seed, options
+            FROM game_matches
+            WHERE ws_match_id = $1
+            "#,
+        )
+        .bind(ws_match_id)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -247,6 +274,7 @@ impl crate::Store {
             r#"
             SELECT
                 gm.id AS match_id,
+                gm.ws_match_id,
                 gm.created_at,
                 gm.finished_at,
                 gm.options,
@@ -439,17 +467,22 @@ impl crate::Store {
 mod tests {
     use crate::Store;
     use serde_json::json;
+    use uuid::Uuid;
 
     #[sqlx::test(migrations = "../migrations")]
     async fn gh_read_helpers_return_rows(pool: sqlx::PgPool) -> anyhow::Result<()> {
         let store = Store { pool };
 
+        let ws_match_id = Uuid::new_v4();
+        let ws_match_id_str = ws_match_id.to_string();
+
         let match_id = store
             .gh_create_match(
+                &ws_match_id_str,
                 Some("0.1.0"),
                 Some(2),
                 Some(42),
-                &json!({ "ws_match_id": "m1" }),
+                &json!({ "ws_match_id": ws_match_id }),
             )
             .await?;
 
@@ -463,7 +496,7 @@ mod tests {
                 Some(0),
                 None,
                 "match.create",
-                &json!({ "ws_match_id": "m1" }),
+                &json!({ "ws_match_id": ws_match_id }),
             )
             .await?;
         store
@@ -473,13 +506,14 @@ mod tests {
                 Some(1),
                 None,
                 "match.join",
-                &json!({ "ws_match_id": "m1" }),
+                &json!({ "ws_match_id": ws_match_id }),
             )
             .await?;
 
         store.gh_finish_match(match_id).await?;
 
         let summary = store.gh_get_match(match_id).await?.expect("match row");
+        assert_eq!(summary.ws_match_id, ws_match_id);
         assert_eq!(summary.server_version.as_deref(), Some("0.1.0"));
         assert!(summary.finished_at.is_some());
 
@@ -500,12 +534,16 @@ mod tests {
     async fn gh_list_events_supports_after_seq(pool: sqlx::PgPool) -> anyhow::Result<()> {
         let store = Store { pool };
 
+        let ws_match_id = Uuid::new_v4();
+        let ws_match_id_str = ws_match_id.to_string();
+
         let match_id = store
             .gh_create_match(
+                &ws_match_id_str,
                 Some("0.1.0"),
                 Some(2),
                 Some(7),
-                &json!({ "ws_match_id": "m2" }),
+                &json!({ "ws_match_id": ws_match_id }),
             )
             .await?;
 
@@ -556,12 +594,16 @@ mod tests {
         let bob_id = insert_user(&store, "bob@example.com", "Bob").await?;
 
         // Match A: Alice wins
+        let match_a_ws = Uuid::new_v4();
+        let match_a_ws_str = match_a_ws.to_string();
+
         let match_a = store
             .gh_create_match(
+                &match_a_ws_str,
                 Some("0.2.0"),
                 Some(2),
                 Some(11),
-                &json!({ "ws_match_id": "match-a" }),
+                &json!({ "ws_match_id": match_a_ws }),
             )
             .await?;
         store
@@ -583,12 +625,16 @@ mod tests {
         store.gh_finish_match(match_a).await?;
 
         // Match B: Bob wins
+        let match_b_ws = Uuid::new_v4();
+        let match_b_ws_str = match_b_ws.to_string();
+
         let match_b = store
             .gh_create_match(
+                &match_b_ws_str,
                 Some("0.2.0"),
                 Some(2),
                 Some(22),
-                &json!({ "ws_match_id": "match-b" }),
+                &json!({ "ws_match_id": match_b_ws }),
             )
             .await?;
         store
@@ -619,8 +665,10 @@ mod tests {
 
         let matches = store.gh_list_player_matches(alice_id, 10, 0).await?;
         assert_eq!(matches.len(), 2);
-        assert_eq!(matches[0].options["ws_match_id"], json!("match-b"));
-        assert_eq!(matches[1].options["ws_match_id"], json!("match-a"));
+        assert_eq!(matches[0].ws_match_id, match_b_ws);
+        assert_eq!(matches[1].ws_match_id, match_a_ws);
+        assert_eq!(matches[0].options["ws_match_id"], json!(match_b_ws));
+        assert_eq!(matches[1].options["ws_match_id"], json!(match_a_ws));
 
         Ok(())
     }
@@ -634,12 +682,16 @@ mod tests {
         let carol_id = insert_user(&store, "carol@example.com", "Carol").await?;
 
         // Match 1: Alice beats Bob
+        let match1_ws = Uuid::new_v4();
+        let match1_ws_str = match1_ws.to_string();
+
         let match1 = store
             .gh_create_match(
+                &match1_ws_str,
                 Some("0.2.0"),
                 Some(2),
                 Some(33),
-                &json!({ "ws_match_id": "m1" }),
+                &json!({ "ws_match_id": match1_ws }),
             )
             .await?;
         store
@@ -661,12 +713,16 @@ mod tests {
         store.gh_finish_match(match1).await?;
 
         // Match 2: Bob beats Alice
+        let match2_ws = Uuid::new_v4();
+        let match2_ws_str = match2_ws.to_string();
+
         let match2 = store
             .gh_create_match(
+                &match2_ws_str,
                 Some("0.2.0"),
                 Some(2),
                 Some(44),
-                &json!({ "ws_match_id": "m2" }),
+                &json!({ "ws_match_id": match2_ws }),
             )
             .await?;
         store
@@ -688,12 +744,16 @@ mod tests {
         store.gh_finish_match(match2).await?;
 
         // Match 3: Bob beats Carol
+        let match3_ws = Uuid::new_v4();
+        let match3_ws_str = match3_ws.to_string();
+
         let match3 = store
             .gh_create_match(
+                &match3_ws_str,
                 Some("0.2.0"),
                 Some(2),
                 Some(55),
-                &json!({ "ws_match_id": "m3" }),
+                &json!({ "ws_match_id": match3_ws }),
             )
             .await?;
         store

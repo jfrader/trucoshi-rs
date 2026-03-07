@@ -13,6 +13,7 @@ fn db_user_id(user_id: i64) -> Option<i64> {
 pub trait GameHistoryBackend: Clone + Send + Sync + 'static {
     async fn gh_create_match(
         &self,
+        ws_match_id: &str,
         server_version: &str,
         protocol_version: i32,
         rng_seed: i64,
@@ -44,12 +45,14 @@ pub trait GameHistoryBackend: Clone + Send + Sync + 'static {
 impl GameHistoryBackend for trucoshi_store::Store {
     async fn gh_create_match(
         &self,
+        ws_match_id: &str,
         server_version: &str,
         protocol_version: i32,
         rng_seed: i64,
         options: serde_json::Value,
     ) -> anyhow::Result<i64> {
         self.gh_create_match(
+            ws_match_id,
             Some(server_version),
             Some(protocol_version),
             Some(rng_seed),
@@ -143,7 +146,13 @@ pub async fn run_game_history_worker<B: GameHistoryBackend>(
                 owner,
             } => {
                 let db_id = match backend
-                    .gh_create_match(&server_version, protocol_version, rng_seed, options)
+                    .gh_create_match(
+                        &match_id,
+                        &server_version,
+                        protocol_version,
+                        rng_seed,
+                        options,
+                    )
                     .await
                 {
                     Ok(id) => id,
@@ -452,6 +461,7 @@ mod tests {
     impl GameHistoryBackend for MockBackend {
         async fn gh_create_match(
             &self,
+            _ws_match_id: &str,
             _server_version: &str,
             _protocol_version: i32,
             _rng_seed: i64,

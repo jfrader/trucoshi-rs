@@ -14,6 +14,7 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use trucoshi_realtime::protocol::ws::v2::schema::ActiveMatchSummary;
 use trucoshi_realtime::server::Realtime;
+use uuid::Uuid;
 
 mod game_history;
 
@@ -867,6 +868,7 @@ struct MatchHistoryEventDto {
 #[derive(Debug, Serialize)]
 struct MatchHistoryResponse {
     id: i64,
+    ws_match_id: Uuid,
     created_at: OffsetDateTime,
     finished_at: Option<OffsetDateTime>,
     server_version: Option<String>,
@@ -880,26 +882,31 @@ struct MatchHistoryResponse {
 
 async fn get_match_history(
     State(state): State<Arc<AppState>>,
-    Path(match_id): Path<i64>,
+    Path(raw_match_id): Path<String>,
     Query(q): Query<MatchHistoryQuery>,
 ) -> Result<Json<MatchHistoryResponse>, ApiError> {
-    let summary = state
-        .store
-        .gh_get_match(match_id)
-        .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(|| ApiError::not_found("match not found"))?;
+    let summary = if let Ok(match_id) = raw_match_id.parse::<i64>() {
+        state.store.gh_get_match(match_id).await
+    } else {
+        let ws_match_id = Uuid::parse_str(&raw_match_id)
+            .map_err(|_| ApiError::bad_request("invalid match id (expected integer or UUID)"))?;
+        state.store.gh_get_match_by_ws_id(ws_match_id).await
+    }
+    .map_err(ApiError::internal)?
+    .ok_or_else(|| ApiError::not_found("match not found"))?;
+
+    let match_db_id = summary.id;
 
     let players = state
         .store
-        .gh_list_players(match_id)
+        .gh_list_players(match_db_id)
         .await
         .map_err(ApiError::internal)?;
 
     let limit = q.limit.unwrap_or(500).clamp(1, 1_000);
     let events = state
         .store
-        .gh_list_events(match_id, limit, q.after_seq)
+        .gh_list_events(match_db_id, limit, q.after_seq)
         .await
         .map_err(ApiError::internal)?;
 
@@ -912,6 +919,7 @@ async fn get_match_history(
 
     Ok(Json(MatchHistoryResponse {
         id: summary.id,
+        ws_match_id: summary.ws_match_id,
         created_at: summary.created_at,
         finished_at: summary.finished_at,
         server_version: summary.server_version,
@@ -1096,11 +1104,7 @@ async fn get_player_profile(
 
 fn player_match_to_dto(row: trucoshi_store::game_history::PlayerMatchRow) -> PlayerMatchDto {
     let match_options = row.options.get("match_options").cloned();
-    let ws_match_id = row
-        .options
-        .get("ws_match_id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let ws_match_id = Some(row.ws_match_id.to_string());
 
     let team_points = row.finish_data.as_ref().and_then(parse_team_points);
 
@@ -1359,12 +1363,16 @@ mod tests {
     async fn match_history_endpoint_pages_events(pool: sqlx::PgPool) -> anyhow::Result<()> {
         let store = trucoshi_store::Store { pool };
 
+        let ws_match_id = Uuid::new_v4();
+        let ws_match_id_str = ws_match_id.to_string();
+
         let match_id = store
             .gh_create_match(
+                &ws_match_id_str,
                 Some("0.2.0"),
                 Some(2),
                 Some(99),
-                &json!({ "ws_match_id": "m-test" }),
+                &json!({ "ws_match_id": ws_match_id }),
             )
             .await?;
 
@@ -1378,7 +1386,7 @@ mod tests {
                 Some(0),
                 None,
                 "match.create",
-                &json!({ "ws_match_id": "m-test" }),
+                &json!({ "ws_match_id": ws_match_id }),
             )
             .await?;
         store
@@ -1388,7 +1396,7 @@ mod tests {
                 Some(1),
                 None,
                 "match.join",
-                &json!({ "ws_match_id": "m-test" }),
+                &json!({ "ws_match_id": ws_match_id }),
             )
             .await?;
 
@@ -1422,6 +1430,7 @@ mod tests {
             .with_state(state);
 
         let res = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri(format!("/v1/history/matches/{match_id}?limit=1"))
@@ -1437,7 +1446,25 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload["players"].as_array().unwrap().len(), 2);
         assert_eq!(payload["events"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["ws_match_id"], serde_json::json!(ws_match_id));
         assert_eq!(payload["next_after_seq"], serde_json::json!(0));
+
+        // WS id lookup should return the same payload.
+        let res_ws = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/history/matches/{ws_match_id}?limit=1"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res_ws.status(), StatusCode::OK);
+        let body_ws = res_ws.into_body().collect().await.unwrap().to_bytes();
+        let payload_ws: serde_json::Value = serde_json::from_slice(&body_ws).unwrap();
+        assert_eq!(payload_ws, payload);
 
         Ok(())
     }
@@ -1546,12 +1573,16 @@ mod tests {
         .await?;
 
         // Alice wins match A
+        let match_a_ws = Uuid::new_v4();
+        let match_a_ws_str = match_a_ws.to_string();
+
         let match_a = store
             .gh_create_match(
+                &match_a_ws_str,
                 Some("0.2.0"),
                 Some(2),
                 Some(11),
-                &json!({ "ws_match_id": "match-a", "match_options": { "max_players": 4 } }),
+                &json!({ "ws_match_id": match_a_ws, "match_options": { "max_players": 4 } }),
             )
             .await?;
         store
@@ -1573,12 +1604,16 @@ mod tests {
         store.gh_finish_match(match_a).await?;
 
         // Bob wins match B
+        let match_b_ws = Uuid::new_v4();
+        let match_b_ws_str = match_b_ws.to_string();
+
         let match_b = store
             .gh_create_match(
+                &match_b_ws_str,
                 Some("0.2.0"),
                 Some(2),
                 Some(22),
-                &json!({ "ws_match_id": "match-b", "match_options": { "max_players": 4 } }),
+                &json!({ "ws_match_id": match_b_ws, "match_options": { "max_players": 4 } }),
             )
             .await?;
         store
@@ -1646,7 +1681,7 @@ mod tests {
         assert_eq!(payload["next_offset"], serde_json::json!(1));
         assert_eq!(
             payload["recent_matches"][0]["ws_match_id"],
-            serde_json::json!("match-b")
+            serde_json::json!(match_b_ws)
         );
         assert_eq!(
             payload["recent_matches"][0]["outcome"],
@@ -1688,12 +1723,16 @@ mod tests {
         .await?;
 
         // Match 1: Alice beats Bob
+        let match1_ws = Uuid::new_v4();
+        let match1_ws_str = match1_ws.to_string();
+
         let match1 = store
             .gh_create_match(
+                &match1_ws_str,
                 Some("0.2.0"),
                 Some(2),
                 Some(33),
-                &json!({ "ws_match_id": "m1" }),
+                &json!({ "ws_match_id": match1_ws }),
             )
             .await?;
         store
@@ -1715,12 +1754,16 @@ mod tests {
         store.gh_finish_match(match1).await?;
 
         // Match 2: Bob beats Alice
+        let match2_ws = Uuid::new_v4();
+        let match2_ws_str = match2_ws.to_string();
+
         let match2 = store
             .gh_create_match(
+                &match2_ws_str,
                 Some("0.2.0"),
                 Some(2),
                 Some(44),
-                &json!({ "ws_match_id": "m2" }),
+                &json!({ "ws_match_id": match2_ws }),
             )
             .await?;
         store
@@ -1742,12 +1785,16 @@ mod tests {
         store.gh_finish_match(match2).await?;
 
         // Match 3: Bob beats Carol
+        let match3_ws = Uuid::new_v4();
+        let match3_ws_str = match3_ws.to_string();
+
         let match3 = store
             .gh_create_match(
+                &match3_ws_str,
                 Some("0.2.0"),
                 Some(2),
                 Some(55),
-                &json!({ "ws_match_id": "m3" }),
+                &json!({ "ws_match_id": match3_ws }),
             )
             .await?;
         store

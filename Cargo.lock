@@ -2324,6 +2324,7 @@ dependencies = [
  "trucoshi-realtime",
  "trucoshi-server",
  "trucoshi-store",
+ "uuid",
 ]
 
 [[package]]
