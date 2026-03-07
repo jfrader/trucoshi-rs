@@ -113,6 +113,33 @@ enum PendingCallKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnvidoSequence {
+    /// One or two Envido calls have been stacked.
+    Envido { count: u8 },
+    /// The last raise was Real Envido.
+    RealEnvido,
+    /// The last raise was Falta Envido.
+    FaltaEnvido,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EnvidoRaiseOptions {
+    allow_envido: bool,
+    allow_real_envido: bool,
+    allow_falta_envido: bool,
+}
+
+impl Default for EnvidoRaiseOptions {
+    fn default() -> Self {
+        Self {
+            allow_envido: true,
+            allow_real_envido: true,
+            allow_falta_envido: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PendingCall {
     kind: PendingCallKind,
     caller_idx: u8,
@@ -131,6 +158,8 @@ struct PendingCall {
     envido_decline_points: u8,
     /// Whether the pending call corresponds to Falta Envido.
     envido_is_falta: bool,
+    /// Tracks which Envido-family command was spoken last.
+    envido_sequence: Option<EnvidoSequence>,
 }
 
 /// Minimal, migration-friendly in-memory game state.
@@ -193,6 +222,44 @@ fn next_opponent_idx(caller_idx: u8, teams_by_player_idx: &[u8]) -> u8 {
     ((caller_idx as usize + 1) % players_len) as u8
 }
 
+fn envido_allowed_raises(seq: Option<EnvidoSequence>) -> EnvidoRaiseOptions {
+    match seq {
+        Some(EnvidoSequence::Envido { count }) => EnvidoRaiseOptions {
+            allow_envido: count < 2,
+            allow_real_envido: true,
+            allow_falta_envido: true,
+        },
+        Some(EnvidoSequence::RealEnvido) => EnvidoRaiseOptions {
+            allow_envido: false,
+            allow_real_envido: false,
+            allow_falta_envido: true,
+        },
+        Some(EnvidoSequence::FaltaEnvido) => EnvidoRaiseOptions {
+            allow_envido: false,
+            allow_real_envido: false,
+            allow_falta_envido: false,
+        },
+        None => EnvidoRaiseOptions::default(),
+    }
+}
+
+fn envido_sequence_after(seq: Option<EnvidoSequence>, cmd: GameCommand) -> Option<EnvidoSequence> {
+    match cmd {
+        GameCommand::Envido => {
+            let count = match seq {
+                Some(EnvidoSequence::Envido { count }) => count.saturating_add(1),
+                _ => 1,
+            };
+            Some(EnvidoSequence::Envido {
+                count: count.min(2),
+            })
+        }
+        GameCommand::RealEnvido => Some(EnvidoSequence::RealEnvido),
+        GameCommand::FaltaEnvido => Some(EnvidoSequence::FaltaEnvido),
+        _ => seq,
+    }
+}
+
 impl GameState {
     /// Best-effort list of commands the given player can say, based on the public hand state.
     ///
@@ -247,8 +314,28 @@ impl GameState {
 
                 v
             }
-            WaitingForTrucoAnswer | WaitingEnvidoAnswer | WaitingFlorAnswer => {
+            WaitingForTrucoAnswer | WaitingFlorAnswer => {
                 vec![GameCommand::Quiero, GameCommand::NoQuiero]
+            }
+            WaitingEnvidoAnswer => {
+                let mut v = Vec::<GameCommand>::new();
+                if let Some(pending) = &self.pending_call {
+                    if pending.kind == PendingCallKind::Envido {
+                        let raises = envido_allowed_raises(pending.envido_sequence);
+                        if raises.allow_envido {
+                            v.push(GameCommand::Envido);
+                        }
+                        if raises.allow_real_envido {
+                            v.push(GameCommand::RealEnvido);
+                        }
+                        if raises.allow_falta_envido {
+                            v.push(GameCommand::FaltaEnvido);
+                        }
+                    }
+                }
+                v.push(GameCommand::Quiero);
+                v.push(GameCommand::NoQuiero);
+                v
             }
             WaitingEnvidoPointsAnswer => vec![GameCommand::SonBuenas],
             DisplayFlorBattle | DisplayPreviousHand | Finished => vec![],
@@ -316,6 +403,83 @@ impl GameState {
     /// This is intentionally a *minimal* ruleset for the migration:
     /// - it updates the public `hand_state` hint
     /// - it can end the hand in the specific case of declining truco
+    fn try_handle_envido_raise(
+        &mut self,
+        cmd: GameCommand,
+        from_player_idx: usize,
+        teams_by_player_idx: &[u8],
+        turn_time_ms: i64,
+        now_ms: i64,
+    ) -> bool {
+        if !matches!(
+            cmd,
+            GameCommand::Envido | GameCommand::RealEnvido | GameCommand::FaltaEnvido
+        ) {
+            return false;
+        }
+
+        let Some(pending) = self.pending_call.as_mut() else {
+            return false;
+        };
+
+        if pending.kind != PendingCallKind::Envido {
+            return false;
+        }
+
+        let current_team = teams_by_player_idx
+            .get(from_player_idx)
+            .copied()
+            .unwrap_or(0);
+        let caller_team = teams_by_player_idx
+            .get(pending.caller_idx as usize)
+            .copied()
+            .unwrap_or(1);
+
+        if current_team == caller_team {
+            return false;
+        }
+
+        let raises = envido_allowed_raises(pending.envido_sequence);
+        let allowed = match cmd {
+            GameCommand::Envido => raises.allow_envido,
+            GameCommand::RealEnvido => raises.allow_real_envido,
+            GameCommand::FaltaEnvido => raises.allow_falta_envido,
+            _ => false,
+        };
+
+        if !allowed {
+            return false;
+        }
+
+        pending.envido_decline_points = pending.envido_points_on_accept.max(1);
+
+        match cmd {
+            GameCommand::Envido => {
+                pending.envido_points_on_accept = pending.envido_points_on_accept.saturating_add(2);
+                pending.envido_is_falta = false;
+            }
+            GameCommand::RealEnvido => {
+                pending.envido_points_on_accept = pending.envido_points_on_accept.saturating_add(3);
+                pending.envido_is_falta = false;
+            }
+            GameCommand::FaltaEnvido => {
+                pending.envido_is_falta = true;
+            }
+            _ => {}
+        }
+
+        pending.envido_sequence = envido_sequence_after(pending.envido_sequence, cmd);
+        pending.caller_idx = u8::try_from(from_player_idx).unwrap_or(pending.caller_idx);
+
+        let responder = next_opponent_idx(pending.caller_idx, teams_by_player_idx);
+        self.turn_idx = responder;
+        self.public.turn_seat_idx = responder;
+        self.turn_expires_at_ms = now_ms.saturating_add(turn_time_ms.max(0));
+        self.public.hand_state = HandState::WaitingEnvidoAnswer;
+
+        true
+    }
+
     pub fn apply_command(
         &mut self,
         cmd: GameCommand,
@@ -374,6 +538,7 @@ impl GameState {
                                 _ => 0,
                             },
                             envido_is_falta: matches!(cmd, GameCommand::FaltaEnvido),
+                            envido_sequence: envido_sequence_after(None, cmd),
                         });
 
                         let responder = next_opponent_idx(caller_idx, teams_by_player_idx);
@@ -383,6 +548,18 @@ impl GameState {
                     }
                 }
             }
+        }
+
+        if prev_state == WaitingEnvidoAnswer
+            && self.try_handle_envido_raise(
+                cmd,
+                from_player_idx,
+                teams_by_player_idx,
+                turn_time_ms,
+                now_ms,
+            )
+        {
+            return CommandOutcome::None;
         }
 
         match (prev_state, cmd) {
@@ -1087,6 +1264,82 @@ mod tests {
         );
         assert_eq!(g.public.hand_state, HandState::WaitingPlay);
         assert_eq!(g.public.turn_seat_idx, 0);
+    }
+
+    #[test]
+    fn envido_raise_sequence_limits_options() {
+        let now = 1_000i64;
+        let mut g = GameState::new_with_forehand(2, 42, 10_000, now, 0);
+        let teams = vec![0u8, 1u8];
+
+        g.apply_command(
+            GameCommand::Envido,
+            0,
+            &teams,
+            9,
+            [0, 0],
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
+
+        let cmds = g.possible_commands_for_player(1, true);
+        assert!(cmds.contains(&GameCommand::Envido));
+        assert!(cmds.contains(&GameCommand::RealEnvido));
+        assert!(cmds.contains(&GameCommand::FaltaEnvido));
+
+        let outcome = g.apply_command(
+            GameCommand::Envido,
+            1,
+            &teams,
+            9,
+            [0, 0],
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
+        assert!(matches!(outcome, CommandOutcome::None));
+        assert_eq!(g.public.hand_state, HandState::WaitingEnvidoAnswer);
+
+        let cmds = g.possible_commands_for_player(0, true);
+        assert!(!cmds.contains(&GameCommand::Envido));
+        assert!(cmds.contains(&GameCommand::RealEnvido));
+        assert!(cmds.contains(&GameCommand::FaltaEnvido));
+
+        g.apply_command(
+            GameCommand::RealEnvido,
+            0,
+            &teams,
+            9,
+            [0, 0],
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
+
+        let cmds = g.possible_commands_for_player(1, true);
+        assert!(!cmds.contains(&GameCommand::Envido));
+        assert!(!cmds.contains(&GameCommand::RealEnvido));
+        assert!(cmds.contains(&GameCommand::FaltaEnvido));
+
+        g.apply_command(
+            GameCommand::FaltaEnvido,
+            1,
+            &teams,
+            9,
+            [0, 0],
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
+
+        let cmds = g.possible_commands_for_player(0, true);
+        assert!(!cmds.iter().any(|c| matches!(
+            c,
+            GameCommand::Envido | GameCommand::RealEnvido | GameCommand::FaltaEnvido
+        )));
+        assert!(cmds.contains(&GameCommand::Quiero));
+        assert!(cmds.contains(&GameCommand::NoQuiero));
     }
 
     #[test]
