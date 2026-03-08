@@ -242,9 +242,9 @@ fn ws_protocol_message_type_strings_are_snake_case_dot_namespaces() {
     use super::{
         ChatJoinData, ChatMessageData, ChatSayData, ChatSnapshotData, ErrorPayload,
         GamePlayCardData, GameSayData, GameSnapshotData, GameUpdateData, HelloData,
-        LobbyMatchRemoveData, LobbyMatchUpsertData, LobbySnapshotData, MatchCreateData,
-        MatchJoinData, MatchLeftData, MatchPauseVoteData, MatchReadyData, MatchRefData,
-        MatchSnapshotData, MatchUpdateData, PingData, PongData,
+        LobbyMatchRemoveData, LobbyMatchUpsertData, LobbySnapshotData, LobbyStatsData,
+        MatchCreateData, MatchJoinData, MatchLeftData, MatchPauseVoteData, MatchReadyData,
+        MatchRefData, MatchSnapshotData, MatchUpdateData, PingData, PongData,
     };
 
     fn type_of<T: serde::Serialize>(msg: T) -> String {
@@ -399,7 +399,9 @@ fn ws_protocol_message_type_strings_are_snake_case_dot_namespaces() {
         })),
         type_of(S2cMessage::LobbySnapshot(LobbySnapshotData {
             matches: vec![lobby_match.clone()],
+            stats: LobbyStatsData { online_players: 1 },
         })),
+        type_of(S2cMessage::LobbyStats(LobbyStatsData { online_players: 1 })),
         type_of(S2cMessage::LobbyMatchUpsert(LobbyMatchUpsertData {
             match_: lobby_match,
         })),

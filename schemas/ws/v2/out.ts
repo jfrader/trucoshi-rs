@@ -25,6 +25,10 @@ export type S2CMessage =
       type: 'lobby.snapshot';
     }
   | {
+      data: LobbyStatsData;
+      type: 'lobby.stats';
+    }
+  | {
       data: LobbyMatchUpsertData;
       type: 'lobby.match.upsert';
     }
@@ -236,6 +240,7 @@ export interface ActiveMatchPlayer {
 }
 export interface LobbySnapshotData {
   matches: LobbyMatch[];
+  stats: LobbyStatsData;
 }
 /**
  * Lobby match summary (protocol v2).
@@ -263,6 +268,12 @@ export interface LobbyMatch {
    * Number of currently connected spectator (watch) sessions.
    */
   spectator_count: number;
+}
+export interface LobbyStatsData {
+  /**
+   * Number of distinct connected users (guest + authenticated).
+   */
+  online_players: number;
 }
 export interface LobbyMatchUpsertData {
   match: LobbyMatch;

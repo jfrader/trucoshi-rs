@@ -298,7 +298,8 @@
     "LobbySnapshotData": {
       "type": "object",
       "required": [
-        "matches"
+        "matches",
+        "stats"
       ],
       "properties": {
         "matches": {
@@ -306,6 +307,24 @@
           "items": {
             "$ref": "#/definitions/LobbyMatch"
           }
+        },
+        "stats": {
+          "$ref": "#/definitions/LobbyStatsData"
+        }
+      },
+      "additionalProperties": false
+    },
+    "LobbyStatsData": {
+      "type": "object",
+      "required": [
+        "online_players"
+      ],
+      "properties": {
+        "online_players": {
+          "description": "Number of distinct connected users (guest + authenticated).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
         }
       },
       "additionalProperties": false
@@ -841,6 +860,25 @@
               "type": "string",
               "enum": [
                 "lobby.snapshot"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "type"
+          ],
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/LobbyStatsData"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "lobby.stats"
               ]
             }
           },

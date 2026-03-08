@@ -21,7 +21,7 @@ pub use error::ErrorPayload;
 pub use messages::{
     ActiveMatchesSnapshotData, C2sMessage, ChatJoinData, ChatMessageData, ChatSayData,
     ChatSnapshotData, GamePlayCardData, GameSayData, GameSnapshotData, GameUpdateData, HelloData,
-    LobbyMatchRemoveData, LobbyMatchUpsertData, LobbySnapshotData, MatchCreateData, MatchJoinData,
-    MatchLeftData, MatchPauseVoteData, MatchReadyData, MatchRefData, MatchSnapshotData,
-    MatchUpdateData, PingData, PongData, S2cMessage,
+    LobbyMatchRemoveData, LobbyMatchUpsertData, LobbySnapshotData, LobbyStatsData, MatchCreateData,
+    MatchJoinData, MatchLeftData, MatchPauseVoteData, MatchReadyData, MatchRefData,
+    MatchSnapshotData, MatchUpdateData, PingData, PongData, S2cMessage,
 };

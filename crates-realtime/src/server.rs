@@ -1,5 +1,7 @@
 use crate::history::{GameHistoryEvent, HistoryPlayer};
-use crate::protocol::ws::v2::messages::{ActiveMatchesSnapshotData, MatchKickedData};
+use crate::protocol::ws::v2::messages::{
+    ActiveMatchesSnapshotData, LobbyStatsData, MatchKickedData,
+};
 use crate::protocol::ws::v2::{
     C2sMessage, ChatMessageData, ChatSnapshotData, ErrorPayload, GameSnapshotData, GameUpdateData,
     HelloData, LobbyMatchRemoveData, LobbyMatchUpsertData, LobbySnapshotData, MatchLeftData,
@@ -275,6 +277,8 @@ impl Realtime {
             debug!(connections = s.connections, %session_id, "ws connected");
         }
 
+        self.broadcast_lobby_stats().await;
+
         // writer task
         let writer = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
@@ -339,6 +343,8 @@ impl Realtime {
             s.connections = s.connections.saturating_sub(1);
             debug!(connections = s.connections, %session_id, "ws disconnected");
         }
+
+        self.broadcast_lobby_stats().await;
 
         for room_id in rooms_to_leave {
             self.leave_room_internal(session_id, &room_id).await;
@@ -2786,19 +2792,22 @@ impl Realtime {
         }
     }
     async fn emit_lobby_snapshot_to(&self, session_id: Uuid, id: Option<String>) {
-        let matches = {
+        let (matches, stats) = {
             let s = self.state.lock().await;
-            s.matches
+            let matches = s
+                .matches
                 .values()
                 .map(Self::lobby_match_for)
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            let stats = Self::lobby_stats_for(&s);
+            (matches, stats)
         };
 
         self.send_to(
             session_id,
             WsOutMessage {
                 v: Default::default(),
-                msg: S2cMessage::LobbySnapshot(LobbySnapshotData { matches }),
+                msg: S2cMessage::LobbySnapshot(LobbySnapshotData { matches, stats }),
                 id: id.into(),
             },
         )
@@ -2851,6 +2860,27 @@ impl Realtime {
         self.broadcast_to(&targets, &msg).await;
     }
 
+    async fn broadcast_lobby_stats(&self) {
+        let (targets, stats) = {
+            let s = self.state.lock().await;
+            let targets = s.sessions.keys().copied().collect::<Vec<_>>();
+            let stats = Self::lobby_stats_for(&s);
+            (targets, stats)
+        };
+
+        if targets.is_empty() {
+            return;
+        }
+
+        let msg = WsOutMessage {
+            v: Default::default(),
+            msg: S2cMessage::LobbyStats(stats),
+            id: Default::default(),
+        };
+
+        self.broadcast_to(&targets, &msg).await;
+    }
+
     fn lobby_match_for(m: &MatchState) -> LobbyMatch {
         let players = m
             .players
@@ -2877,6 +2907,18 @@ impl Realtime {
             players,
             owner_seat_idx: u8::try_from(owner_seat_idx).unwrap_or(0),
             spectator_count,
+        }
+    }
+
+    fn lobby_stats_for(state: &RealtimeState) -> LobbyStatsData {
+        let mut users: HashSet<i64> = HashSet::new();
+
+        for sess in state.sessions.values() {
+            users.insert(sess.user_id);
+        }
+
+        LobbyStatsData {
+            online_players: u32::try_from(users.len()).unwrap_or(u32::MAX),
         }
     }
 
@@ -4055,6 +4097,50 @@ mod e2e_smoke_tests {
 
         None
     }
+
+    #[test]
+    fn lobby_stats_counts_distinct_users() {
+        let mut state = RealtimeState::default();
+
+        for user_id in [42, 42, 77, -1] {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            state.sessions.insert(
+                Uuid::new_v4(),
+                SessionState {
+                    user_id,
+                    tx,
+                    active_match_id: None,
+                    player_key: None,
+                    rooms: std::collections::HashSet::new(),
+                    last_active_ms: 0,
+                },
+            );
+        }
+
+        let stats = Realtime::lobby_stats_for(&state);
+        assert_eq!(stats.online_players, 3);
+    }
+
+    #[tokio::test]
+    async fn broadcast_lobby_stats_sends_unique_user_count() {
+        let rt = Realtime::new();
+        let (_s1, mut rx1) = add_session(&rt, 1).await;
+        let (_s2, mut rx2) = add_session(&rt, 1).await;
+        let (_s3, mut rx3) = add_session(&rt, 2).await;
+
+        rt.broadcast_lobby_stats().await;
+
+        for rx in [&mut rx1, &mut rx2, &mut rx3] {
+            let msg = rx.recv().await.expect("lobby stats message");
+            match msg.msg {
+                S2cMessage::LobbyStats(data) => {
+                    assert_eq!(data.online_players, 2);
+                }
+                other => panic!("expected lobby stats, got {other:?}"),
+            }
+        }
+    }
+
     async fn run_match_to_completion(rt: &Realtime, owner: Uuid, player: Uuid) -> String {
         rt.handle_message(
             owner,

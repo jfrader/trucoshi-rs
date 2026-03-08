@@ -154,6 +154,15 @@ pub struct HelloData {
 #[serde(deny_unknown_fields)]
 pub struct LobbySnapshotData {
     pub matches: Vec<LobbyMatch>,
+    pub stats: LobbyStatsData,
+}
+
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LobbyStatsData {
+    /// Number of distinct connected users (guest + authenticated).
+    pub online_players: u32,
 }
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
@@ -342,6 +351,9 @@ pub enum S2cMessage {
 
     #[serde(rename = "lobby.snapshot")]
     LobbySnapshot(LobbySnapshotData),
+
+    #[serde(rename = "lobby.stats")]
+    LobbyStats(LobbyStatsData),
 
     #[serde(rename = "lobby.match.upsert")]
     LobbyMatchUpsert(LobbyMatchUpsertData),
