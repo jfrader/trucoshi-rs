@@ -549,6 +549,47 @@ pub struct PublicChatUser {
 }
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatCommandOutcomeKind {
+    None,
+    PointsAwarded,
+    HandEnded,
+}
+
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatCommandMetadataOutcome {
+    pub kind: ChatCommandOutcomeKind,
+
+    #[serde(default, skip_serializing_if = "Maybe::is_none")]
+    pub winner_team_idx: Maybe<TeamIdx>,
+
+    #[serde(default, skip_serializing_if = "Maybe::is_none")]
+    pub points: Maybe<u8>,
+
+    #[serde(default, skip_serializing_if = "Maybe::is_none")]
+    pub award_reason: Maybe<String>,
+}
+
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChatMessageMetadata {
+    CardPlayed {
+        card: String,
+    },
+
+    Command {
+        command: GameCommand,
+
+        #[serde(default, skip_serializing_if = "Maybe::is_none")]
+        outcome: Maybe<ChatCommandMetadataOutcome>,
+    },
+}
+
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublicChatMessage {
@@ -565,6 +606,9 @@ pub struct PublicChatMessage {
     pub system: bool,
 
     pub content: String,
+
+    #[serde(default, skip_serializing_if = "Maybe::is_none")]
+    pub metadata: Maybe<ChatMessageMetadata>,
 }
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]

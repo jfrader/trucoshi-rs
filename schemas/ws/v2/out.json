@@ -100,6 +100,35 @@
       },
       "additionalProperties": false
     },
+    "ChatCommandMetadataOutcome": {
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "award_reason": {
+          "$ref": "#/definitions/String"
+        },
+        "kind": {
+          "$ref": "#/definitions/ChatCommandOutcomeKind"
+        },
+        "points": {
+          "$ref": "#/definitions/uint8"
+        },
+        "winner_team_idx": {
+          "$ref": "#/definitions/TeamIdx"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ChatCommandOutcomeKind": {
+      "type": "string",
+      "enum": [
+        "none",
+        "points_awarded",
+        "hand_ended"
+      ]
+    },
     "ChatMessageData": {
       "type": "object",
       "required": [
@@ -115,6 +144,49 @@
         }
       },
       "additionalProperties": false
+    },
+    "ChatMessageMetadata": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "card",
+            "type"
+          ],
+          "properties": {
+            "card": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "card_played"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "command",
+            "type"
+          ],
+          "properties": {
+            "command": {
+              "$ref": "#/definitions/GameCommand"
+            },
+            "outcome": {
+              "$ref": "#/definitions/ChatCommandMetadataOutcome"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "command"
+              ]
+            }
+          }
+        }
+      ]
     },
     "ChatSnapshotData": {
       "type": "object",
@@ -564,6 +636,9 @@
         },
         "id": {
           "type": "string"
+        },
+        "metadata": {
+          "$ref": "#/definitions/ChatMessageMetadata"
         },
         "system": {
           "description": "Whether the message is system-generated.\n\nProtocol v2 is strict: this field is always present (use `false` for normal messages).",

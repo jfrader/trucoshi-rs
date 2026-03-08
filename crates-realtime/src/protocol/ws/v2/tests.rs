@@ -319,6 +319,7 @@ fn ws_protocol_message_type_strings_are_snake_case_dot_namespaces() {
         user: chat_user,
         system: false,
         content: "hi".into(),
+        metadata: Maybe(None),
     };
 
     let c2s_types = vec![

@@ -7,8 +7,9 @@ use crate::protocol::ws::v2::{
     HelloData, LobbyMatchRemoveData, LobbyMatchUpsertData, LobbySnapshotData, MatchLeftData,
     MatchSnapshotData, MatchUpdateData, PongData, S2cMessage, WsInMessage, WsOutMessage,
     schema::{
-        ActiveMatchPlayer, ActiveMatchSummary, HandState, LobbyMatch, MatchOptions, MatchPhase,
-        Maybe, PrivatePlayer, PublicChatMessage, PublicChatRoom, PublicChatUser, PublicMatch,
+        ActiveMatchPlayer, ActiveMatchSummary, ChatCommandMetadataOutcome, ChatCommandOutcomeKind,
+        ChatMessageMetadata, GameCommand, HandState, LobbyMatch, MatchOptions, MatchPhase, Maybe,
+        PrivatePlayer, PublicChatMessage, PublicChatRoom, PublicChatUser, PublicMatch,
         PublicPauseRequest, PublicPendingUnpause, PublicPlayer, TeamIdx,
     },
 };
@@ -22,7 +23,7 @@ use std::{
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Duration, sleep};
 use tracing::{debug, warn};
-use trucoshi_game::{CommandOutcome, PlayOutcome, PointsAwardReason};
+use trucoshi_game::{CommandOutcome, GameState, PlayOutcome, PointsAwardReason};
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -74,6 +75,14 @@ struct ChatHistoryContext {
     actor_seat_idx: Option<u8>,
     actor_team_idx: Option<u8>,
     actor_user_id: i64,
+}
+
+#[derive(Debug, Clone)]
+struct SystemChatMessage {
+    match_id: String,
+    user: PublicChatUser,
+    content: String,
+    metadata: Option<ChatMessageMetadata>,
 }
 
 #[derive(Debug, Clone)]
@@ -1633,7 +1642,7 @@ impl Realtime {
                             }
                         }
                     }
-                }
+                };
 
                 if let Some((code, msg)) = err {
                     self.send_to(session_id, Self::err_out(id, code, msg)).await;
@@ -1706,6 +1715,7 @@ impl Realtime {
                 let mut err: Option<(String, String)> = None;
                 let mut history_action: Option<GameHistoryEvent> = None;
                 let mut history_finish: Option<([u8; 2], String)> = None;
+                let mut system_chat: Option<SystemChatMessage> = None;
                 {
                     let mut s = self.state.lock().await;
                     let Some(m) = s.matches.get_mut(&msid) else {
@@ -1778,6 +1788,7 @@ impl Realtime {
                                     m.options.turn_time_ms,
                                     Self::now_ms(),
                                 );
+                                let played_card = Self::last_played_card(g);
 
                                 match outcome {
                                     PlayOutcome::Invalid => {
@@ -1874,6 +1885,20 @@ impl Realtime {
                                         }
                                     }
                                 }
+
+                                if err.is_none() {
+                                    if let Some(player) = m.players.get(from_player_idx) {
+                                        let seat_idx = u8::try_from(from_player_idx).unwrap_or(0);
+                                        if let Some(msg) = Self::system_card_chat_message(
+                                            &msid,
+                                            player,
+                                            seat_idx,
+                                            played_card.clone(),
+                                        ) {
+                                            system_chat = Some(msg);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1882,6 +1907,16 @@ impl Realtime {
                 if let Some((code, msg)) = err {
                     self.send_to(session_id, Self::err_out(id, code, msg)).await;
                     return;
+                }
+
+                if let Some(chat) = system_chat.take() {
+                    self.append_system_chat_message(
+                        &chat.match_id,
+                        chat.user,
+                        chat.content,
+                        chat.metadata,
+                    )
+                    .await;
                 }
 
                 if let Some(ev) = history_action.take() {
@@ -1914,6 +1949,7 @@ impl Realtime {
                 let msid = d.match_id;
                 let command = d.command;
                 let command_for_history = command.clone();
+                let command_for_chat = command.clone();
 
                 let (active_msid, pkey, actor_user_id) = {
                     let s = self.state.lock().await;
@@ -1967,6 +2003,7 @@ impl Realtime {
                 let mut err: Option<(String, String)> = None;
                 let mut history_action: Option<GameHistoryEvent> = None;
                 let mut history_finish: Option<([u8; 2], String)> = None;
+                let mut system_chat: Option<SystemChatMessage> = None;
                 {
                     let mut s = self.state.lock().await;
                     let Some(m) = s.matches.get_mut(&msid) else {
@@ -2056,7 +2093,7 @@ impl Realtime {
                                     now_ms,
                                 );
 
-                                match out {
+                                let chat_outcome = match out {
                                     CommandOutcome::None => {
                                         history_action = Some(GameHistoryEvent::GameAction {
                                             match_id: msid.clone(),
@@ -2071,6 +2108,13 @@ impl Realtime {
                                                 "server_time_ms": now_ms,
                                             }),
                                         });
+
+                                        Some(ChatCommandMetadataOutcome {
+                                            kind: ChatCommandOutcomeKind::None,
+                                            winner_team_idx: Maybe(None),
+                                            points: Maybe(None),
+                                            award_reason: Maybe(None),
+                                        })
                                     }
 
                                     CommandOutcome::PointsAwarded {
@@ -2121,6 +2165,15 @@ impl Realtime {
                                             history_finish =
                                                 Some((m.team_points, "score_reached".into()));
                                         }
+
+                                        Some(ChatCommandMetadataOutcome {
+                                            kind: ChatCommandOutcomeKind::PointsAwarded,
+                                            winner_team_idx: Self::maybe_team_idx_value(
+                                                winner_team_idx,
+                                            ),
+                                            points: Maybe(Some(points)),
+                                            award_reason: Maybe(Some(award_reason.to_string())),
+                                        })
                                     }
 
                                     CommandOutcome::HandEnded {
@@ -2184,6 +2237,30 @@ impl Realtime {
                                                     next_forehand,
                                                 ));
                                         }
+
+                                        Some(ChatCommandMetadataOutcome {
+                                            kind: ChatCommandOutcomeKind::HandEnded,
+                                            winner_team_idx: Self::maybe_team_idx_value(
+                                                winner_team_idx,
+                                            ),
+                                            points: Maybe(Some(points)),
+                                            award_reason: Maybe(None),
+                                        })
+                                    }
+                                };
+
+                                if err.is_none() {
+                                    if let Some(player) = m.players.get(from_player_idx) {
+                                        let seat_idx = u8::try_from(from_player_idx).unwrap_or(0);
+                                        if let Some(outcome) = chat_outcome {
+                                            system_chat = Some(Self::system_command_chat_message(
+                                                &msid,
+                                                player,
+                                                seat_idx,
+                                                command_for_chat.clone(),
+                                                outcome,
+                                            ));
+                                        }
                                     }
                                 }
                             }
@@ -2194,6 +2271,16 @@ impl Realtime {
                 if let Some((code, msg)) = err {
                     self.send_to(session_id, Self::err_out(id, code, msg)).await;
                     return;
+                }
+
+                if let Some(chat) = system_chat.take() {
+                    self.append_system_chat_message(
+                        &chat.match_id,
+                        chat.user,
+                        chat.content,
+                        chat.metadata,
+                    )
+                    .await;
                 }
 
                 if let Some(ev) = history_action.take() {
@@ -3929,6 +4016,7 @@ impl Realtime {
             user,
             system: false,
             content,
+            metadata: Maybe(None),
         };
 
         room.messages.push(msg.clone());
@@ -3943,6 +4031,43 @@ impl Realtime {
             message: msg,
             history,
         })
+    }
+
+    async fn append_system_chat_message(
+        &self,
+        room_id: &str,
+        user: PublicChatUser,
+        content: String,
+        metadata: Option<ChatMessageMetadata>,
+    ) {
+        let mut s = self.state.lock().await;
+        let room = s
+            .rooms
+            .entry(room_id.to_string())
+            .or_insert_with(|| ChatRoomState {
+                id: room_id.to_string(),
+                messages: vec![],
+                participants: HashSet::new(),
+            });
+
+        let msg = PublicChatMessage {
+            id: Uuid::new_v4().to_string(),
+            date_ms: Self::now_ms(),
+            user,
+            system: true,
+            content,
+            metadata: Maybe(metadata),
+        };
+
+        room.messages.push(msg.clone());
+        if room.messages.len() > 200 {
+            let drain = room.messages.len().saturating_sub(200);
+            room.messages.drain(0..drain);
+        }
+
+        drop(s);
+
+        self.broadcast_chat_message(room_id, msg, None).await;
     }
 
     async fn emit_chat_snapshot_to(&self, session_id: Uuid, room_id: &str, id: Option<String>) {
@@ -4038,6 +4163,81 @@ impl Realtime {
         self.broadcast_to(&participants, &msg).await;
     }
 
+    fn chat_user_for_player(player: &PlayerState, seat_idx: u8) -> PublicChatUser {
+        PublicChatUser {
+            name: player.name.clone(),
+            seat_idx: Maybe(Some(seat_idx)),
+            team: Maybe(Some(player.team)),
+        }
+    }
+
+    fn maybe_team_idx_value(value: u8) -> Maybe<TeamIdx> {
+        Maybe(TeamIdx::try_from(value).ok())
+    }
+
+    fn last_played_card(game: &GameState) -> Option<String> {
+        for round in game.public.rounds.iter().rev() {
+            if let Some(card) = round.last() {
+                return Some(card.card.clone());
+            }
+        }
+        None
+    }
+
+    fn system_card_chat_message(
+        match_id: &str,
+        player: &PlayerState,
+        seat_idx: u8,
+        card: Option<String>,
+    ) -> Option<SystemChatMessage> {
+        let card = card?;
+        let content = format!("{} played {}", player.name, card);
+
+        Some(SystemChatMessage {
+            match_id: match_id.to_string(),
+            user: Self::chat_user_for_player(player, seat_idx),
+            content,
+            metadata: Some(ChatMessageMetadata::CardPlayed { card }),
+        })
+    }
+
+    fn command_label(command: GameCommand) -> &'static str {
+        match command {
+            GameCommand::Truco => "truco",
+            GameCommand::Retruco => "retruco",
+            GameCommand::ValeCuatro => "vale_cuatro",
+            GameCommand::Envido => "envido",
+            GameCommand::RealEnvido => "real_envido",
+            GameCommand::FaltaEnvido => "falta_envido",
+            GameCommand::Flor => "flor",
+            GameCommand::ContraFlor => "contra_flor",
+            GameCommand::ContraFlorAlResto => "contra_flor_al_resto",
+            GameCommand::Quiero => "quiero",
+            GameCommand::NoQuiero => "no_quiero",
+            GameCommand::SonBuenas => "son_buenas",
+        }
+    }
+
+    fn system_command_chat_message(
+        match_id: &str,
+        player: &PlayerState,
+        seat_idx: u8,
+        command: GameCommand,
+        outcome: ChatCommandMetadataOutcome,
+    ) -> SystemChatMessage {
+        let content = format!("{} said {}", player.name, Self::command_label(command));
+
+        SystemChatMessage {
+            match_id: match_id.to_string(),
+            user: Self::chat_user_for_player(player, seat_idx),
+            content,
+            metadata: Some(ChatMessageMetadata::Command {
+                command,
+                outcome: Maybe(Some(outcome)),
+            }),
+        }
+    }
+
     async fn maybe_start_pending_hand(&self, match_id: &str, correlated: Option<(Uuid, String)>) {
         let should_broadcast = {
             let mut s = self.state.lock().await;
@@ -4075,10 +4275,12 @@ mod e2e_smoke_tests {
     use crate::protocol::ws::v2::messages::{
         MatchKickData, MatchOptionsSetData, MatchPauseVoteData, MatchWatchData,
     };
-    use crate::protocol::ws::v2::schema::GameCommand;
+    use crate::protocol::ws::v2::schema::{
+        ChatCommandOutcomeKind, ChatMessageMetadata, GameCommand,
+    };
     use crate::protocol::ws::v2::{
-        ChatJoinData, ChatSayData, GamePlayCardData, GameSayData, MatchCreateData, MatchJoinData,
-        MatchReadyData, MatchRefData, WsInMessage,
+        ChatJoinData, ChatMessageData, ChatSayData, GamePlayCardData, GameSayData, MatchCreateData,
+        MatchJoinData, MatchReadyData, MatchRefData, WsInMessage,
     };
     use tokio::sync::mpsc::error::TryRecvError;
 
@@ -4130,6 +4332,54 @@ mod e2e_smoke_tests {
         }
 
         None
+    }
+
+    async fn expect_chat_snapshot(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<WsOutMessage>,
+        room_id: &str,
+    ) {
+        use tokio::time::{Duration, timeout};
+
+        timeout(Duration::from_millis(500), async {
+            loop {
+                match rx.recv().await {
+                    Some(msg) => {
+                        if let S2cMessage::ChatSnapshot(data) = msg.msg {
+                            if data.room.id == room_id {
+                                return;
+                            }
+                        }
+                    }
+                    None => panic!("channel closed before chat snapshot"),
+                }
+            }
+        })
+        .await
+        .expect("chat snapshot timeout");
+    }
+
+    async fn expect_chat_message(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<WsOutMessage>,
+        room_id: &str,
+    ) -> ChatMessageData {
+        use tokio::time::{Duration, timeout};
+
+        timeout(Duration::from_millis(500), async {
+            loop {
+                match rx.recv().await {
+                    Some(msg) => {
+                        if let S2cMessage::ChatMessage(data) = msg.msg {
+                            if data.room_id == room_id {
+                                return data;
+                            }
+                        }
+                    }
+                    None => panic!("channel closed before chat message"),
+                }
+            }
+        })
+        .await
+        .expect("chat message timeout")
     }
 
     #[test]
@@ -7464,6 +7714,317 @@ mod e2e_smoke_tests {
                 .and_then(|v| v.as_str()),
             Some(message.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn system_chat_emits_metadata_for_played_cards() {
+        let rt = Realtime::new();
+        let (s1, mut rx1) = add_session(&rt, 700).await;
+        let (s2, mut rx2) = add_session(&rt, 701).await;
+
+        rt.handle_message(
+            s1,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchCreate(MatchCreateData {
+                    name: "p1".into(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                    options: Some(MatchOptions {
+                        max_players: 2,
+                        match_points: 1,
+                        turn_time_ms: 30_000,
+                        ..MatchOptions::default()
+                    })
+                    .into(),
+                }),
+            },
+        )
+        .await;
+
+        let match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&s1)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("creator should be in a match")
+        };
+
+        rt.handle_message(
+            s2,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchJoin(MatchJoinData {
+                    match_id: match_id.clone(),
+                    name: "p2".into(),
+                    team: Some(TeamIdx::TEAM_1).into(),
+                }),
+            },
+        )
+        .await;
+
+        for (sid, ready) in [(s1, true), (s2, true)] {
+            rt.handle_message(
+                sid,
+                WsInMessage {
+                    v: Default::default(),
+                    id: Default::default(),
+                    msg: C2sMessage::MatchReady(MatchReadyData {
+                        match_id: match_id.clone(),
+                        ready,
+                    }),
+                },
+            )
+            .await;
+        }
+
+        rt.handle_message(
+            s1,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchStart(MatchRefData {
+                    match_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+
+        rt.handle_message(
+            s1,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::ChatJoin(ChatJoinData {
+                    room_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+        expect_chat_snapshot(&mut rx1, &match_id).await;
+
+        rt.handle_message(
+            s2,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::ChatJoin(ChatJoinData {
+                    room_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+        expect_chat_snapshot(&mut rx2, &match_id).await;
+
+        let (turn_session_id, expected_card) = {
+            let s = rt.state.lock().await;
+            let m = s.matches.get(&match_id).expect("match exists");
+            let g = m.game.as_ref().expect("game started");
+            let seat_idx = g.public.turn_seat_idx as usize;
+            let key = m.players[seat_idx].key.clone();
+            let turn_session_id = *s
+                .sessions
+                .iter()
+                .find_map(|(sid, sess)| {
+                    (sess.player_key.as_deref() == Some(key.as_str())).then_some(sid)
+                })
+                .expect("turn session");
+            let card = g
+                .hands()
+                .get(seat_idx)
+                .and_then(|hand| hand.first().cloned())
+                .expect("expected card in hand");
+            (turn_session_id, card)
+        };
+
+        drain_receiver(&mut rx1);
+        drain_receiver(&mut rx2);
+
+        rt.handle_message(
+            turn_session_id,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::GamePlayCard(GamePlayCardData {
+                    match_id: match_id.clone(),
+                    card_idx: 0,
+                }),
+            },
+        )
+        .await;
+
+        let chat = expect_chat_message(&mut rx1, &match_id).await;
+        assert!(chat.message.system, "expected system chat for card play");
+        assert_eq!(chat.room_id, match_id);
+
+        match chat.message.metadata.0 {
+            Some(ChatMessageMetadata::CardPlayed { card }) => {
+                assert_eq!(card, expected_card);
+            }
+            other => panic!("expected card metadata, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn system_chat_emits_metadata_for_commands() {
+        let rt = Realtime::new();
+        let (s1, mut rx1) = add_session(&rt, 710).await;
+        let (s2, mut rx2) = add_session(&rt, 711).await;
+
+        rt.handle_message(
+            s1,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchCreate(MatchCreateData {
+                    name: "p1".into(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                    options: Some(MatchOptions {
+                        max_players: 2,
+                        match_points: 1,
+                        turn_time_ms: 30_000,
+                        ..MatchOptions::default()
+                    })
+                    .into(),
+                }),
+            },
+        )
+        .await;
+
+        let match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&s1)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("creator should be in a match")
+        };
+
+        rt.handle_message(
+            s2,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchJoin(MatchJoinData {
+                    match_id: match_id.clone(),
+                    name: "p2".into(),
+                    team: Some(TeamIdx::TEAM_1).into(),
+                }),
+            },
+        )
+        .await;
+
+        for (sid, ready) in [(s1, true), (s2, true)] {
+            rt.handle_message(
+                sid,
+                WsInMessage {
+                    v: Default::default(),
+                    id: Default::default(),
+                    msg: C2sMessage::MatchReady(MatchReadyData {
+                        match_id: match_id.clone(),
+                        ready,
+                    }),
+                },
+            )
+            .await;
+        }
+
+        rt.handle_message(
+            s1,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchStart(MatchRefData {
+                    match_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+
+        rt.handle_message(
+            s1,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::ChatJoin(ChatJoinData {
+                    room_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+        expect_chat_snapshot(&mut rx1, &match_id).await;
+
+        rt.handle_message(
+            s2,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::ChatJoin(ChatJoinData {
+                    room_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+        expect_chat_snapshot(&mut rx2, &match_id).await;
+
+        drain_receiver(&mut rx1);
+        drain_receiver(&mut rx2);
+
+        rt.handle_message(
+            s1,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::GameSay(GameSayData {
+                    match_id: match_id.clone(),
+                    command: GameCommand::Envido,
+                }),
+            },
+        )
+        .await;
+
+        let envido_chat = expect_chat_message(&mut rx1, &match_id).await;
+        match envido_chat.message.metadata.0 {
+            Some(ChatMessageMetadata::Command { command, outcome }) => {
+                assert_eq!(command, GameCommand::Envido);
+                let outcome = outcome.0.expect("expected outcome metadata");
+                assert_eq!(outcome.kind, ChatCommandOutcomeKind::None);
+                assert!(outcome.winner_team_idx.0.is_none());
+                assert!(outcome.points.0.is_none());
+                assert!(outcome.award_reason.0.is_none());
+            }
+            other => panic!("expected command metadata for Envido, got {other:?}"),
+        }
+
+        rt.handle_message(
+            s2,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::GameSay(GameSayData {
+                    match_id: match_id.clone(),
+                    command: GameCommand::NoQuiero,
+                }),
+            },
+        )
+        .await;
+
+        let decline_chat = expect_chat_message(&mut rx1, &match_id).await;
+        match decline_chat.message.metadata.0 {
+            Some(ChatMessageMetadata::Command { command, outcome }) => {
+                assert_eq!(command, GameCommand::NoQuiero);
+                let outcome = outcome.0.expect("expected outcome metadata");
+                assert_eq!(outcome.kind, ChatCommandOutcomeKind::PointsAwarded);
+                let winner = outcome
+                    .winner_team_idx
+                    .0
+                    .expect("expected winner team for decline");
+                assert_eq!(winner.as_u8(), 0);
+                assert_eq!(outcome.points.0, Some(1));
+                assert_eq!(outcome.award_reason.0.as_deref(), Some("envido_declined"));
+            }
+            other => panic!("expected command metadata for NoQuiero, got {other:?}"),
+        }
     }
 
     #[tokio::test]

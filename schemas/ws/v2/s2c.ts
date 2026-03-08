@@ -103,6 +103,19 @@ export type HandState =
   | 'display_flor_battle'
   | 'display_previous_hand'
   | 'finished';
+export type ChatMessageMetadata =
+  | {
+      card: string;
+      type: 'card_played';
+      [k: string]: unknown;
+    }
+  | {
+      command: GameCommand;
+      outcome?: ChatCommandMetadataOutcome;
+      type: 'command';
+      [k: string]: unknown;
+    };
+export type ChatCommandOutcomeKind = 'none' | 'points_awarded' | 'hand_ended';
 export type Uint8 = number;
 
 export interface PongData {
@@ -353,6 +366,7 @@ export interface PublicChatMessage {
    */
   date_ms: number;
   id: string;
+  metadata?: ChatMessageMetadata;
   /**
    * Whether the message is system-generated.
    *
@@ -360,6 +374,12 @@ export interface PublicChatMessage {
    */
   system: boolean;
   user: PublicChatUser;
+}
+export interface ChatCommandMetadataOutcome {
+  award_reason?: string;
+  kind: ChatCommandOutcomeKind;
+  points?: Uint8;
+  winner_team_idx?: TeamIdx;
 }
 export interface PublicChatUser {
   name: string;
