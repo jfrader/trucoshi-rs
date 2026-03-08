@@ -66,6 +66,14 @@ pub struct MatchRefData {
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct MatchPauseVoteData {
+    pub match_id: String,
+    pub accept: bool,
+}
+
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MatchKickData {
     pub match_id: String,
     pub seat_idx: u8,
@@ -287,6 +295,9 @@ pub enum C2sMessage {
 
     #[serde(rename = "match.pause")]
     MatchPause(MatchRefData),
+
+    #[serde(rename = "match.pause.vote")]
+    MatchPauseVote(MatchPauseVoteData),
 
     #[serde(rename = "match.resume")]
     MatchResume(MatchRefData),

@@ -383,11 +383,36 @@ pub struct PublicMatch {
     /// Seat index (in `players[]`) of the current match owner.
     pub owner_seat_idx: u8,
 
+    #[serde(default, skip_serializing_if = "Maybe::is_none")]
+    pub pause_request: Maybe<PublicPauseRequest>,
+
+    #[serde(default, skip_serializing_if = "Maybe::is_none")]
+    pub pending_unpause: Maybe<PublicPendingUnpause>,
+
     /// Number of currently connected spectator (watch) sessions.
     pub spectator_count: u32,
 
     /// Current match points for teams 0 and 1.
     pub team_points: [u8; 2],
+}
+
+/// Pending pause request metadata exposed in `PublicMatch`.
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicPauseRequest {
+    pub requested_by_team: TeamIdx,
+    pub awaiting_team: TeamIdx,
+    pub requested_by_seat_idx: u8,
+    pub expires_at_ms: i64,
+}
+
+/// Pending unpause countdown metadata.
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicPendingUnpause {
+    pub resume_at_ms: i64,
 }
 
 /// Public player view (protocol v2).

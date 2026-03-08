@@ -68,8 +68,8 @@ export type S2CMessage =
       data: ErrorPayload;
       type: 'error';
     };
-export type MatchPhase = 'lobby' | 'started' | 'paused' | 'finished';
 export type TeamIdx = 0 | 1;
+export type MatchPhase = 'lobby' | 'started' | 'paused' | 'finished';
 export type Int64 = number;
 /**
  * Core gameplay commands (Truco argentino).
@@ -148,6 +148,8 @@ export interface PublicMatch {
    * Seat index (in `players[]`) of the current match owner.
    */
   owner_seat_idx: number;
+  pause_request?: PublicPauseRequest;
+  pending_unpause?: PublicPendingUnpause;
   phase: MatchPhase;
   /**
    * Players ordered by seating/turn order (server-defined).
@@ -196,6 +198,21 @@ export interface MatchOptions {
    * Turn timer in milliseconds.
    */
   turn_time_ms: number;
+}
+/**
+ * Pending pause request metadata exposed in `PublicMatch`.
+ */
+export interface PublicPauseRequest {
+  awaiting_team: TeamIdx;
+  expires_at_ms: number;
+  requested_by_seat_idx: number;
+  requested_by_team: TeamIdx;
+}
+/**
+ * Pending unpause countdown metadata.
+ */
+export interface PublicPendingUnpause {
+  resume_at_ms: number;
 }
 /**
  * Public player view (protocol v2).

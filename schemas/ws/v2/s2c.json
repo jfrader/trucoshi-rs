@@ -924,6 +924,12 @@
           "format": "uint8",
           "minimum": 0.0
         },
+        "pause_request": {
+          "$ref": "#/definitions/PublicPauseRequest"
+        },
+        "pending_unpause": {
+          "$ref": "#/definitions/PublicPendingUnpause"
+        },
         "phase": {
           "$ref": "#/definitions/MatchPhase"
         },
@@ -950,6 +956,48 @@
           },
           "maxItems": 2,
           "minItems": 2
+        }
+      },
+      "additionalProperties": false
+    },
+    "PublicPauseRequest": {
+      "description": "Pending pause request metadata exposed in `PublicMatch`.",
+      "type": "object",
+      "required": [
+        "awaiting_team",
+        "expires_at_ms",
+        "requested_by_seat_idx",
+        "requested_by_team"
+      ],
+      "properties": {
+        "awaiting_team": {
+          "$ref": "#/definitions/TeamIdx"
+        },
+        "expires_at_ms": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "requested_by_seat_idx": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "requested_by_team": {
+          "$ref": "#/definitions/TeamIdx"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PublicPendingUnpause": {
+      "description": "Pending unpause countdown metadata.",
+      "type": "object",
+      "required": [
+        "resume_at_ms"
+      ],
+      "properties": {
+        "resume_at_ms": {
+          "type": "integer",
+          "format": "int64"
         }
       },
       "additionalProperties": false

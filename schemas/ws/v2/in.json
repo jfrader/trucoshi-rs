@@ -269,6 +269,25 @@
           ],
           "properties": {
             "data": {
+              "$ref": "#/definitions/MatchPauseVoteData"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "match.pause.vote"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "type"
+          ],
+          "properties": {
+            "data": {
               "$ref": "#/definitions/MatchRefData"
             },
             "type": {
@@ -710,6 +729,22 @@
         },
         "options": {
           "$ref": "#/definitions/MatchOptions2"
+        }
+      },
+      "additionalProperties": false
+    },
+    "MatchPauseVoteData": {
+      "type": "object",
+      "required": [
+        "accept",
+        "match_id"
+      ],
+      "properties": {
+        "accept": {
+          "type": "boolean"
+        },
+        "match_id": {
+          "type": "string"
         }
       },
       "additionalProperties": false

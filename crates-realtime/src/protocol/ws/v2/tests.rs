@@ -243,8 +243,8 @@ fn ws_protocol_message_type_strings_are_snake_case_dot_namespaces() {
         ChatJoinData, ChatMessageData, ChatSayData, ChatSnapshotData, ErrorPayload,
         GamePlayCardData, GameSayData, GameSnapshotData, GameUpdateData, HelloData,
         LobbyMatchRemoveData, LobbyMatchUpsertData, LobbySnapshotData, MatchCreateData,
-        MatchJoinData, MatchLeftData, MatchReadyData, MatchRefData, MatchSnapshotData,
-        MatchUpdateData, PingData, PongData,
+        MatchJoinData, MatchLeftData, MatchPauseVoteData, MatchReadyData, MatchRefData,
+        MatchSnapshotData, MatchUpdateData, PingData, PongData,
     };
 
     fn type_of<T: serde::Serialize>(msg: T) -> String {
@@ -278,6 +278,8 @@ fn ws_protocol_message_type_strings_are_snake_case_dot_namespaces() {
             ready: false,
         }],
         owner_seat_idx: 0,
+        pause_request: Maybe(None),
+        pending_unpause: Maybe(None),
         spectator_count: 0,
         team_points: [0, 0],
     };
@@ -351,6 +353,10 @@ fn ws_protocol_message_type_strings_are_snake_case_dot_namespaces() {
         })),
         type_of(C2sMessage::MatchPause(MatchRefData {
             match_id: "m".into(),
+        })),
+        type_of(C2sMessage::MatchPauseVote(MatchPauseVoteData {
+            match_id: "m".into(),
+            accept: true,
         })),
         type_of(C2sMessage::MatchResume(MatchRefData {
             match_id: "m".into(),

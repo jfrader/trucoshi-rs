@@ -55,6 +55,10 @@ export type C2SMessage =
       type: 'match.pause';
     }
   | {
+      data: MatchPauseVoteData;
+      type: 'match.pause.vote';
+    }
+  | {
       data: MatchRefData;
       type: 'match.resume';
     }
@@ -175,6 +179,10 @@ export interface MatchRefData {
 export interface MatchReadyData {
   match_id: string;
   ready: boolean;
+}
+export interface MatchPauseVoteData {
+  accept: boolean;
+  match_id: string;
 }
 export interface MatchOptionsSetData {
   match_id: string;
