@@ -39,6 +39,11 @@ services:
       JWT_AUDIENCE: trucoshi
       TWITTER_CLIENT_ID: TODO
       TWITTER_CLIENT_SECRET: TODO
+      SMTP_HOST: ""
+      SMTP_PORT: 587
+      SMTP_USERNAME: ""
+      SMTP_PASSWORD: ""
+      EMAIL_FROM: ""
 
     ports:
       - "2992:2992"

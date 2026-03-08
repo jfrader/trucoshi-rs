@@ -35,4 +35,5 @@ npm run gen:ws
 
 - DB migrations are applied automatically on startup.
 - For now, Twitter OAuth env vars are placeholders.
+- Account recovery + verification emails use SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, and EMAIL_FROM; leave them blank (or unset) to disable email in dev.
 - See `DEPLOYING.md` for more details.

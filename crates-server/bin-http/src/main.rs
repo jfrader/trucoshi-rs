@@ -7,6 +7,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use headers::{Authorization, HeaderMapExt, authorization::Bearer};
+use mailer::Mailer;
 use serde::{Deserialize, Serialize};
 use std::{convert::TryFrom, net::SocketAddr, sync::Arc};
 use time::{Duration, OffsetDateTime};
@@ -17,6 +18,7 @@ use trucoshi_realtime::server::Realtime;
 use uuid::Uuid;
 
 mod game_history;
+mod mailer;
 
 #[derive(Clone)]
 struct AppState {
@@ -24,6 +26,8 @@ struct AppState {
     tokens: trucoshi_auth::tokens::TokenConfig,
     cookie: CookieConfig,
     twitter: TwitterConfig,
+    public_base_url: String,
+    mailer: Mailer,
     realtime: Realtime,
 }
 
@@ -112,6 +116,8 @@ async fn main() -> anyhow::Result<()> {
         same_site: SameSite::Lax,
     };
 
+    let mailer = mailer::Mailer::from_env()?;
+
     let state = Arc::new(AppState {
         store,
         tokens: trucoshi_auth::tokens::TokenConfig {
@@ -123,10 +129,12 @@ async fn main() -> anyhow::Result<()> {
         },
         cookie,
         twitter: TwitterConfig {
-            public_base_url,
+            public_base_url: public_base_url.clone(),
             client_id: twitter_client_id,
             client_secret: twitter_client_secret,
         },
+        public_base_url,
+        mailer,
         realtime: Realtime::new_with_history(history_tx),
     });
 
@@ -138,6 +146,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/auth/me", get(me))
         .route("/v1/auth/refresh-tokens", post(refresh_tokens))
         .route("/v1/auth/logout", post(logout))
+        .route(
+            "/v1/auth/send-verification-email",
+            post(send_verification_email),
+        )
+        .route("/v1/auth/verify-email", post(verify_email))
+        .route("/v1/auth/forgot-password", post(forgot_password))
+        .route("/v1/auth/reset-password", post(reset_password))
         // ===== Tournaments (no wallets/bets) =====
         .route(
             "/v1/tournaments",
@@ -233,6 +248,7 @@ struct UserDto {
     name: String,
     avatar_url: Option<String>,
     twitter_handle: Option<String>,
+    is_email_verified: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -249,6 +265,7 @@ struct UserRow {
     name: String,
     avatar_url: Option<String>,
     twitter_handle: Option<String>,
+    is_email_verified: bool,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -258,6 +275,33 @@ struct RefreshRow {
     expires_at: OffsetDateTime,
     revoked_at: Option<OffsetDateTime>,
 }
+
+#[derive(Debug, Deserialize)]
+struct ForgotPasswordRequest {
+    email: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResetPasswordRequest {
+    token: String,
+    password: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct VerifyEmailRequest {
+    token: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct UserTokenRow {
+    id: i64,
+    user_id: i64,
+    expires_at: OffsetDateTime,
+    consumed_at: Option<OffsetDateTime>,
+}
+
+const TOKEN_TYPE_VERIFY_EMAIL: &str = "verify_email";
+const TOKEN_TYPE_RESET_PASSWORD: &str = "reset_password";
 
 #[derive(Debug)]
 struct AuthedUser {
@@ -303,7 +347,7 @@ async fn register(
         r#"
         INSERT INTO users (email, password_hash, name)
         VALUES ($1, $2, $3)
-        RETURNING id, email, password_hash, name, avatar_url, twitter_handle
+        RETURNING id, email, password_hash, name, avatar_url, twitter_handle, is_email_verified
         "#,
     )
     .bind(req.email)
@@ -321,7 +365,7 @@ async fn login(
     Json(req): Json<LoginRequest>,
 ) -> Result<Response, ApiError> {
     let rec: UserRow = sqlx::query_as(
-        r#"SELECT id, email, password_hash, name, avatar_url, twitter_handle FROM users WHERE email = $1"#,
+        r#"SELECT id, email, password_hash, name, avatar_url, twitter_handle, is_email_verified FROM users WHERE email = $1"#,
     )
     .bind(req.email)
     .fetch_optional(&state.store.pool)
@@ -347,7 +391,7 @@ async fn me(
     AuthedUser { user_id }: AuthedUser,
 ) -> Result<Json<UserDto>, ApiError> {
     let rec: UserRow = sqlx::query_as(
-        r#"SELECT id, email, password_hash, name, avatar_url, twitter_handle FROM users WHERE id = $1"#,
+        r#"SELECT id, email, password_hash, name, avatar_url, twitter_handle, is_email_verified FROM users WHERE id = $1"#,
     )
     .bind(user_id)
     .fetch_one(&state.store.pool)
@@ -360,6 +404,7 @@ async fn me(
         name: rec.name,
         avatar_url: rec.avatar_url,
         twitter_handle: rec.twitter_handle,
+        is_email_verified: rec.is_email_verified,
     }))
 }
 
@@ -439,6 +484,256 @@ async fn logout(
     Ok(res)
 }
 
+async fn send_verification_email(
+    State(state): State<Arc<AppState>>,
+    AuthedUser { user_id }: AuthedUser,
+) -> Result<Response, ApiError> {
+    let rec: UserRow = sqlx::query_as(
+        r#"SELECT id, email, password_hash, name, avatar_url, twitter_handle, is_email_verified FROM users WHERE id = $1"#,
+    )
+    .bind(user_id)
+    .fetch_one(&state.store.pool)
+    .await
+    .map_err(ApiError::internal)?;
+
+    let UserRow {
+        id,
+        email,
+        name,
+        is_email_verified,
+        ..
+    } = rec;
+
+    if is_email_verified {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+
+    let email = email.ok_or_else(|| ApiError::bad_request("user has no email configured"))?;
+
+    let token = create_user_token(
+        &state.store.pool,
+        id,
+        TOKEN_TYPE_VERIFY_EMAIL,
+        Duration::minutes(30),
+    )
+    .await?;
+
+    let link = public_link(
+        &state.public_base_url,
+        &format!("verify-email?token={token}"),
+    );
+
+    let subject = "Verificá tu email en Trucoshi";
+    let body = format!(
+        "Hola {},
+
+Para verificar tu email en Trucoshi, abrí este link: {}
+Si no creaste esta cuenta, ignorá este mensaje.
+",
+        name, link
+    );
+
+    state
+        .mailer
+        .send(&email, subject, &body)
+        .await
+        .map_err(ApiError::internal)?;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn verify_email(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<VerifyEmailRequest>,
+) -> Result<Response, ApiError> {
+    let token = req.token.trim();
+    if token.is_empty() {
+        return Err(ApiError::bad_request("token is required"));
+    }
+
+    let row = consume_user_token(&state.store.pool, TOKEN_TYPE_VERIFY_EMAIL, token).await?;
+
+    sqlx::query(
+        "UPDATE users SET is_email_verified = TRUE, email_verified_at = now() WHERE id = $1",
+    )
+    .bind(row.user_id)
+    .execute(&state.store.pool)
+    .await
+    .map_err(ApiError::internal)?;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn forgot_password(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ForgotPasswordRequest>,
+) -> Result<Response, ApiError> {
+    let email = req.email.trim();
+    if email.is_empty() {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+
+    if let Some(rec) = sqlx::query_as::<_, UserRow>(
+        r#"SELECT id, email, password_hash, name, avatar_url, twitter_handle, is_email_verified
+           FROM users WHERE email IS NOT NULL AND lower(email) = lower($1)"#,
+    )
+    .bind(email)
+    .fetch_optional(&state.store.pool)
+    .await
+    .map_err(ApiError::internal)?
+    {
+        if rec.password_hash.is_some() {
+            if let Some(rec_email) = rec.email.clone() {
+                let token = create_user_token(
+                    &state.store.pool,
+                    rec.id,
+                    TOKEN_TYPE_RESET_PASSWORD,
+                    Duration::minutes(30),
+                )
+                .await?;
+
+                let link = public_link(
+                    &state.public_base_url,
+                    &format!("reset-password?token={token}"),
+                );
+
+                let subject = "Resetear tu contraseña de Trucoshi";
+                let body = format!(
+                    "Hola {},
+
+Para resetear tu contraseña, abrí este link: {}
+Si no pediste el cambio, ignorá este mensaje.
+",
+                    rec.name, link
+                );
+
+                if let Err(err) = state.mailer.send(&rec_email, subject, &body).await {
+                    tracing::error!(error = %err, "failed to send reset password email");
+                }
+            }
+        }
+    }
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn reset_password(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ResetPasswordRequest>,
+) -> Result<Response, ApiError> {
+    let token = req.token.trim();
+    if token.is_empty() {
+        return Err(ApiError::bad_request("token is required"));
+    }
+
+    if req.password.len() < 8 {
+        return Err(ApiError::bad_request(
+            "password must be at least 8 characters",
+        ));
+    }
+
+    let row = consume_user_token(&state.store.pool, TOKEN_TYPE_RESET_PASSWORD, token).await?;
+
+    let password_hash = trucoshi_auth::password::hash_password(&req.password)
+        .map_err(|_| ApiError::bad_request("invalid password"))?;
+
+    let mut tx = state.store.pool.begin().await.map_err(ApiError::internal)?;
+
+    sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
+        .bind(&password_hash)
+        .bind(row.user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(ApiError::internal)?;
+
+    sqlx::query("DELETE FROM refresh_tokens WHERE user_id = $1")
+        .bind(row.user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(ApiError::internal)?;
+
+    tx.commit().await.map_err(ApiError::internal)?;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn create_user_token(
+    pool: &sqlx::PgPool,
+    user_id: i64,
+    token_type: &str,
+    ttl: Duration,
+) -> Result<String, ApiError> {
+    let token = trucoshi_auth::refresh::new_refresh_token();
+    let token_hash = trucoshi_auth::refresh::hash_refresh_token(&token);
+    let expires_at = OffsetDateTime::now_utc() + ttl;
+
+    let mut tx = pool.begin().await.map_err(ApiError::internal)?;
+
+    sqlx::query("DELETE FROM user_tokens WHERE user_id = $1 AND token_type = $2")
+        .bind(user_id)
+        .bind(token_type)
+        .execute(&mut *tx)
+        .await
+        .map_err(ApiError::internal)?;
+
+    sqlx::query(
+        "INSERT INTO user_tokens (user_id, token_type, token_hash, expires_at) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(user_id)
+    .bind(token_type)
+    .bind(token_hash)
+    .bind(expires_at)
+    .execute(&mut *tx)
+    .await
+    .map_err(ApiError::internal)?;
+
+    tx.commit().await.map_err(ApiError::internal)?;
+
+    Ok(token)
+}
+
+async fn consume_user_token(
+    pool: &sqlx::PgPool,
+    token_type: &str,
+    token: &str,
+) -> Result<UserTokenRow, ApiError> {
+    let token_hash = trucoshi_auth::refresh::hash_refresh_token(token);
+
+    let row = sqlx::query_as::<_, UserTokenRow>(
+        r#"SELECT id, user_id, expires_at, consumed_at FROM user_tokens WHERE token_type = $1 AND token_hash = $2"#,
+    )
+    .bind(token_type)
+    .bind(token_hash)
+    .fetch_optional(pool)
+    .await
+    .map_err(ApiError::internal)?
+    .ok_or_else(|| ApiError::unauthorized("invalid or expired token"))?;
+
+    if row.consumed_at.is_some() || row.expires_at <= OffsetDateTime::now_utc() {
+        return Err(ApiError::unauthorized("invalid or expired token"));
+    }
+
+    let updated = sqlx::query(
+        "UPDATE user_tokens SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL",
+    )
+    .bind(row.id)
+    .execute(pool)
+    .await
+    .map_err(ApiError::internal)?;
+
+    if updated.rows_affected() == 0 {
+        return Err(ApiError::unauthorized("invalid or expired token"));
+    }
+
+    Ok(row)
+}
+
+fn public_link(base: &str, path: &str) -> String {
+    let trimmed_base = base.trim_end_matches('/');
+    let trimmed_path = path.trim_start_matches('/');
+    format!("{trimmed_base}/{trimmed_path}")
+}
+
 async fn issue_tokens_and_cookie(
     state: &Arc<AppState>,
     user_id: i64,
@@ -465,7 +760,7 @@ async fn issue_tokens_and_cookie(
     .map_err(ApiError::internal)?;
 
     let rec: UserRow = sqlx::query_as(
-        r#"SELECT id, email, password_hash, name, avatar_url, twitter_handle FROM users WHERE id = $1"#,
+        r#"SELECT id, email, password_hash, name, avatar_url, twitter_handle, is_email_verified FROM users WHERE id = $1"#,
     )
     .bind(user_id)
     .fetch_one(&state.store.pool)
@@ -480,6 +775,7 @@ async fn issue_tokens_and_cookie(
             name: rec.name,
             avatar_url: rec.avatar_url,
             twitter_handle: rec.twitter_handle,
+            is_email_verified: rec.is_email_verified,
         },
     };
 
@@ -1353,7 +1649,7 @@ impl IntoResponse for ApiError {
 mod tests {
     use super::*;
 
-    use axum::{Router, body::Body, http::Request, routing::get};
+    use axum::{Router, body::Body, extract::State, http::Request, routing::get};
     use http_body_util::BodyExt;
     use serde_json::json;
     use std::sync::Arc;
@@ -1422,6 +1718,8 @@ mod tests {
                 client_id: "id".into(),
                 client_secret: "secret".into(),
             },
+            public_base_url: "http://localhost".into(),
+            mailer: Mailer::disabled(),
             realtime: Realtime::new(),
         });
 
@@ -1502,6 +1800,8 @@ mod tests {
                 client_id: "id".into(),
                 client_secret: "secret".into(),
             },
+            public_base_url: "http://localhost".into(),
+            mailer: Mailer::disabled(),
             realtime: Realtime::new(),
         });
 
@@ -1654,6 +1954,8 @@ mod tests {
                 client_id: "id".into(),
                 client_secret: "secret".into(),
             },
+            public_base_url: "http://localhost".into(),
+            mailer: Mailer::disabled(),
             realtime: Realtime::new(),
         });
 
@@ -1835,6 +2137,8 @@ mod tests {
                 client_id: "id".into(),
                 client_secret: "secret".into(),
             },
+            public_base_url: "http://localhost".into(),
+            mailer: Mailer::disabled(),
             realtime: Realtime::new(),
         });
 
@@ -1861,6 +2165,217 @@ mod tests {
         assert_eq!(entries[0]["rank"], serde_json::json!(1));
         assert_eq!(entries[1]["user_id"], serde_json::json!(alice_id));
         assert_eq!(payload["next_offset"], serde_json::json!(2));
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn send_verification_email_creates_token(pool: sqlx::PgPool) -> anyhow::Result<()> {
+        let store = trucoshi_store::Store { pool };
+
+        let user_id: i64 = sqlx::query_scalar(
+            "INSERT INTO users (email, password_hash, name) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind("verify@example.com")
+        .bind("hash")
+        .bind("Verify Me")
+        .fetch_one(&store.pool)
+        .await?;
+
+        let state = Arc::new(AppState {
+            store: store.clone(),
+            tokens: trucoshi_auth::tokens::TokenConfig {
+                issuer: "test".into(),
+                audience: "test".into(),
+                access_ttl: Duration::minutes(5),
+                refresh_ttl: Duration::minutes(5),
+                jwt_hs256_secret: vec![0; 32],
+            },
+            cookie: CookieConfig {
+                refresh_cookie_name: "refresh".into(),
+                refresh_cookie_path: "/v1/auth/refresh-tokens".into(),
+                secure: false,
+                same_site: SameSite::Lax,
+            },
+            twitter: TwitterConfig {
+                public_base_url: "http://localhost".into(),
+                client_id: "id".into(),
+                client_secret: "secret".into(),
+            },
+            public_base_url: "http://localhost".into(),
+            mailer: Mailer::disabled(),
+            realtime: Realtime::new(),
+        });
+
+        let res = send_verification_email(State(state.clone()), AuthedUser { user_id })
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        let token_type: String =
+            sqlx::query_scalar("SELECT token_type FROM user_tokens WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_one(&state.store.pool)
+                .await?;
+
+        assert_eq!(token_type, TOKEN_TYPE_VERIFY_EMAIL);
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn verify_email_marks_user_verified(pool: sqlx::PgPool) -> anyhow::Result<()> {
+        let store = trucoshi_store::Store { pool };
+
+        let user_id: i64 = sqlx::query_scalar(
+            "INSERT INTO users (email, password_hash, name) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind("verify2@example.com")
+        .bind("hash")
+        .bind("Verify Later")
+        .fetch_one(&store.pool)
+        .await?;
+
+        let token = trucoshi_auth::refresh::new_refresh_token();
+        let token_hash = trucoshi_auth::refresh::hash_refresh_token(&token);
+        let expires_at = OffsetDateTime::now_utc() + Duration::minutes(30);
+
+        sqlx::query(
+            "INSERT INTO user_tokens (user_id, token_type, token_hash, expires_at) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(user_id)
+        .bind(TOKEN_TYPE_VERIFY_EMAIL)
+        .bind(token_hash)
+        .bind(expires_at)
+        .execute(&store.pool)
+        .await?;
+
+        let state = Arc::new(AppState {
+            store: store.clone(),
+            tokens: trucoshi_auth::tokens::TokenConfig {
+                issuer: "test".into(),
+                audience: "test".into(),
+                access_ttl: Duration::minutes(5),
+                refresh_ttl: Duration::minutes(5),
+                jwt_hs256_secret: vec![0; 32],
+            },
+            cookie: CookieConfig {
+                refresh_cookie_name: "refresh".into(),
+                refresh_cookie_path: "/v1/auth/refresh-tokens".into(),
+                secure: false,
+                same_site: SameSite::Lax,
+            },
+            twitter: TwitterConfig {
+                public_base_url: "http://localhost".into(),
+                client_id: "id".into(),
+                client_secret: "secret".into(),
+            },
+            public_base_url: "http://localhost".into(),
+            mailer: Mailer::disabled(),
+            realtime: Realtime::new(),
+        });
+
+        let res = verify_email(State(state.clone()), Json(VerifyEmailRequest { token }))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        let verified: bool =
+            sqlx::query_scalar("SELECT is_email_verified FROM users WHERE id = $1")
+                .bind(user_id)
+                .fetch_one(&state.store.pool)
+                .await?;
+        assert!(verified);
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn reset_password_updates_hash_and_revokes_tokens(
+        pool: sqlx::PgPool,
+    ) -> anyhow::Result<()> {
+        let store = trucoshi_store::Store { pool };
+
+        let user_id: i64 = sqlx::query_scalar(
+            "INSERT INTO users (email, password_hash, name) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind("reset@example.com")
+        .bind("old-hash")
+        .bind("Reset Me")
+        .fetch_one(&store.pool)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO refresh_tokens (user_id, expires_at, token_hash) VALUES ($1, now() + interval '1 day', $2)",
+        )
+        .bind(user_id)
+        .bind("refresh-hash")
+        .execute(&store.pool)
+        .await?;
+
+        let token = trucoshi_auth::refresh::new_refresh_token();
+        let token_hash = trucoshi_auth::refresh::hash_refresh_token(&token);
+        let expires_at = OffsetDateTime::now_utc() + Duration::minutes(30);
+
+        sqlx::query(
+            "INSERT INTO user_tokens (user_id, token_type, token_hash, expires_at) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(user_id)
+        .bind(TOKEN_TYPE_RESET_PASSWORD)
+        .bind(token_hash)
+        .bind(expires_at)
+        .execute(&store.pool)
+        .await?;
+
+        let state = Arc::new(AppState {
+            store: store.clone(),
+            tokens: trucoshi_auth::tokens::TokenConfig {
+                issuer: "test".into(),
+                audience: "test".into(),
+                access_ttl: Duration::minutes(5),
+                refresh_ttl: Duration::minutes(5),
+                jwt_hs256_secret: vec![0; 32],
+            },
+            cookie: CookieConfig {
+                refresh_cookie_name: "refresh".into(),
+                refresh_cookie_path: "/v1/auth/refresh-tokens".into(),
+                secure: false,
+                same_site: SameSite::Lax,
+            },
+            twitter: TwitterConfig {
+                public_base_url: "http://localhost".into(),
+                client_id: "id".into(),
+                client_secret: "secret".into(),
+            },
+            public_base_url: "http://localhost".into(),
+            mailer: Mailer::disabled(),
+            realtime: Realtime::new(),
+        });
+
+        let res = reset_password(
+            State(state.clone()),
+            Json(ResetPasswordRequest {
+                token,
+                password: "newpassword123".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        let stored_hash: Option<String> =
+            sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1")
+                .bind(user_id)
+                .fetch_one(&store.pool)
+                .await?;
+        assert_ne!(stored_hash.as_deref(), Some("old-hash"));
+
+        let refresh_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM refresh_tokens WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_one(&store.pool)
+                .await?;
+        assert_eq!(refresh_count, 0);
 
         Ok(())
     }

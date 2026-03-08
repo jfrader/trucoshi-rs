@@ -36,3 +36,4 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 sha2 = "0.10"
 base64 = "0.22"
 futures-util = "0.3"
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "ring", "webpki-roots"] }
