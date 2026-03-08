@@ -2719,11 +2719,45 @@ impl Realtime {
             }
 
             C2sMessage::ChatJoin(d) => {
+                let allowed = {
+                    let s = self.state.lock().await;
+                    s.sessions
+                        .get(&session_id)
+                        .map(|sess| sess.active_match_id.as_deref() == Some(d.room_id.as_str()))
+                        .unwrap_or(false)
+                };
+
+                if !allowed {
+                    self.send_to(
+                        session_id,
+                        Self::err_out(id, "NOT_IN_MATCH", "chat room access denied"),
+                    )
+                    .await;
+                    return;
+                }
+
                 self.join_room_internal(session_id, &d.room_id).await;
                 self.emit_chat_snapshot_to(session_id, &d.room_id, id).await;
             }
 
             C2sMessage::ChatSay(d) => {
+                let member_of_room = {
+                    let s = self.state.lock().await;
+                    s.sessions
+                        .get(&session_id)
+                        .map(|sess| sess.rooms.contains(d.room_id.as_str()))
+                        .unwrap_or(false)
+                };
+
+                if !member_of_room {
+                    self.send_to(
+                        session_id,
+                        Self::err_out(id, "NOT_IN_ROOM", "not joined to chat room"),
+                    )
+                    .await;
+                    return;
+                }
+
                 let msg = self
                     .append_chat_message(&d.room_id, session_id, d.content)
                     .await;
@@ -4043,8 +4077,8 @@ mod e2e_smoke_tests {
     };
     use crate::protocol::ws::v2::schema::GameCommand;
     use crate::protocol::ws::v2::{
-        ChatSayData, GamePlayCardData, GameSayData, MatchCreateData, MatchJoinData, MatchReadyData,
-        MatchRefData, WsInMessage,
+        ChatJoinData, ChatSayData, GamePlayCardData, GameSayData, MatchCreateData, MatchJoinData,
+        MatchReadyData, MatchRefData, WsInMessage,
     };
     use tokio::sync::mpsc::error::TryRecvError;
 
@@ -7430,6 +7464,82 @@ mod e2e_smoke_tests {
                 .and_then(|v| v.as_str()),
             Some(message.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn chat_join_rejected_when_not_in_match() {
+        let rt = Realtime::new();
+        let (s1, mut rx1) = add_session(&rt, 404).await;
+
+        rt.handle_message(
+            s1,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::ChatJoin(ChatJoinData {
+                    room_id: "room".into(),
+                }),
+            },
+        )
+        .await;
+
+        let err = recv_error(&mut rx1)
+            .await
+            .expect("expected error when joining chat without a match");
+        assert_eq!(err.code, "NOT_IN_MATCH");
+    }
+
+    #[tokio::test]
+    async fn chat_say_rejected_when_not_in_room() {
+        let rt = Realtime::new();
+        let (owner, _owner_rx) = add_session(&rt, 101).await;
+        let (intruder, mut intruder_rx) = add_session(&rt, 202).await;
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchCreate(MatchCreateData {
+                    name: "owner".into(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                    options: Some(MatchOptions {
+                        max_players: 2,
+                        match_points: 1,
+                        turn_time_ms: 30_000,
+                        ..MatchOptions::default()
+                    })
+                    .into(),
+                }),
+            },
+        )
+        .await;
+
+        let match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&owner)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("owner match expected")
+        };
+
+        rt.handle_message(
+            intruder,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::ChatSay(ChatSayData {
+                    room_id: match_id,
+                    content: "hey".into(),
+                }),
+            },
+        )
+        .await;
+
+        let err = recv_error(&mut intruder_rx)
+            .await
+            .expect("expected chat error for intruder");
+        assert_eq!(err.code, "NOT_IN_ROOM");
     }
 
     #[tokio::test]
