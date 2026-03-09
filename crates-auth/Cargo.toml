@@ -17,3 +17,5 @@ uuid = { workspace = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }
 hex = "0.4"
+once_cell = { workspace = true }
+hmac = { workspace = true }

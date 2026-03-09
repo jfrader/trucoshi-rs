@@ -37,6 +37,7 @@ services:
       JWT_SECRET: dev-secret-change-me
       JWT_ISSUER: trucoshi
       JWT_AUDIENCE: trucoshi
+      SEED_HASH_SECRET: dev-seed-secret-change-me
       TWITTER_CLIENT_ID: TODO
       TWITTER_CLIENT_SECRET: TODO
       SMTP_HOST: ""

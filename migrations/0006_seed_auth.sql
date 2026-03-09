@@ -1,0 +1,7 @@
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS seed_hash TEXT,
+  ADD COLUMN IF NOT EXISTS has_seed BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE UNIQUE INDEX IF NOT EXISTS users_seed_hash_idx
+  ON users(seed_hash)
+  WHERE seed_hash IS NOT NULL;

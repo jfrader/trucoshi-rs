@@ -13,6 +13,7 @@ use std::{convert::TryFrom, net::SocketAddr, sync::Arc};
 use time::{Duration, OffsetDateTime};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use trucoshi_auth::seed;
 use trucoshi_realtime::protocol::ws::v2::schema::ActiveMatchSummary;
 use trucoshi_realtime::server::Realtime;
 use uuid::Uuid;
@@ -28,6 +29,7 @@ struct AppState {
     twitter: TwitterConfig,
     public_base_url: String,
     mailer: Mailer,
+    seed_hash_secret: Vec<u8>,
     realtime: Realtime,
 }
 
@@ -118,6 +120,10 @@ async fn main() -> anyhow::Result<()> {
 
     let mailer = mailer::Mailer::from_env()?;
 
+    let seed_hash_secret = std::env::var("SEED_HASH_SECRET")
+        .expect("SEED_HASH_SECRET is required")
+        .into_bytes();
+
     let state = Arc::new(AppState {
         store,
         tokens: trucoshi_auth::tokens::TokenConfig {
@@ -135,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
         },
         public_base_url,
         mailer,
+        seed_hash_secret,
         realtime: Realtime::new_with_history(history_tx),
     });
 
@@ -143,6 +150,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/v2/ws", get(ws_handler))
         .route("/v1/auth/register", post(register))
         .route("/v1/auth/login", post(login))
+        .route("/v1/auth/register-seed", post(register_seed))
+        .route("/v1/auth/login-seed", post(login_seed))
         .route("/v1/auth/me", get(me))
         .route("/v1/auth/refresh-tokens", post(refresh_tokens))
         .route("/v1/auth/logout", post(logout))
@@ -241,6 +250,23 @@ struct LoginRequest {
     password: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct RegisterSeedRequest {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LoginSeedRequest {
+    seed_phrase: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RegisterSeedResponse {
+    seed_phrase: String,
+    access_token: String,
+    user: UserDto,
+}
+
 #[derive(Debug, Serialize)]
 struct UserDto {
     id: i64,
@@ -249,6 +275,7 @@ struct UserDto {
     avatar_url: Option<String>,
     twitter_handle: Option<String>,
     is_email_verified: bool,
+    has_seed: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -266,6 +293,7 @@ struct UserRow {
     avatar_url: Option<String>,
     twitter_handle: Option<String>,
     is_email_verified: bool,
+    has_seed: bool,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -347,7 +375,7 @@ async fn register(
         r#"
         INSERT INTO users (email, password_hash, name)
         VALUES ($1, $2, $3)
-        RETURNING id, email, password_hash, name, avatar_url, twitter_handle, is_email_verified
+        RETURNING id, email, password_hash, name, avatar_url, twitter_handle, is_email_verified, has_seed
         "#,
     )
     .bind(req.email)
@@ -365,7 +393,7 @@ async fn login(
     Json(req): Json<LoginRequest>,
 ) -> Result<Response, ApiError> {
     let rec: UserRow = sqlx::query_as(
-        r#"SELECT id, email, password_hash, name, avatar_url, twitter_handle, is_email_verified FROM users WHERE email = $1"#,
+        r#"SELECT id, email, password_hash, name, avatar_url, twitter_handle, is_email_verified, has_seed FROM users WHERE email = $1"#,
     )
     .bind(req.email)
     .fetch_optional(&state.store.pool)
@@ -386,12 +414,67 @@ async fn login(
     issue_tokens_and_cookie(&state, rec.id).await
 }
 
+async fn register_seed(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RegisterSeedRequest>,
+) -> Result<Response, ApiError> {
+    let trimmed = req.name.trim();
+    if trimmed.is_empty() {
+        return Err(ApiError::bad_request("name required"));
+    }
+    if trimmed.chars().count() > 40 {
+        return Err(ApiError::bad_request("name too long"));
+    }
+    let name = trimmed.to_string();
+
+    let seed_phrase = normalize_seed_phrase(&seed::generate_seed_phrase(None))?;
+    let seed_hash = seed::hash_seed_phrase(&seed_phrase, state.seed_hash_secret.as_slice());
+
+    let user_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO users (name, seed_hash, has_seed)
+        VALUES ($1, $2, TRUE)
+        RETURNING id
+        "#,
+    )
+    .bind(&name)
+    .bind(seed_hash)
+    .fetch_one(&state.store.pool)
+    .await
+    .map_err(ApiError::internal)?;
+
+    issue_tokens_and_cookie_with_body(&state, user_id, move |auth| RegisterSeedResponse {
+        seed_phrase,
+        access_token: auth.access_token,
+        user: auth.user,
+    })
+    .await
+}
+
+async fn login_seed(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LoginSeedRequest>,
+) -> Result<Response, ApiError> {
+    let normalized = normalize_seed_phrase(&req.seed_phrase)?;
+    let seed_hash = seed::hash_seed_phrase(&normalized, state.seed_hash_secret.as_slice());
+
+    let user_id: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM users WHERE seed_hash = $1 AND has_seed = TRUE")
+            .bind(seed_hash)
+            .fetch_optional(&state.store.pool)
+            .await
+            .map_err(ApiError::internal)?;
+
+    let user_id = user_id.ok_or_else(|| ApiError::unauthorized("invalid seed phrase"))?;
+    issue_tokens_and_cookie(&state, user_id).await
+}
+
 async fn me(
     State(state): State<Arc<AppState>>,
     AuthedUser { user_id }: AuthedUser,
 ) -> Result<Json<UserDto>, ApiError> {
     let rec: UserRow = sqlx::query_as(
-        r#"SELECT id, email, password_hash, name, avatar_url, twitter_handle, is_email_verified FROM users WHERE id = $1"#,
+        r#"SELECT id, email, password_hash, name, avatar_url, twitter_handle, is_email_verified, has_seed FROM users WHERE id = $1"#,
     )
     .bind(user_id)
     .fetch_one(&state.store.pool)
@@ -404,6 +487,7 @@ async fn me(
         name: rec.name,
         avatar_url: rec.avatar_url,
         twitter_handle: rec.twitter_handle,
+        has_seed: rec.has_seed,
         is_email_verified: rec.is_email_verified,
     }))
 }
@@ -489,7 +573,7 @@ async fn send_verification_email(
     AuthedUser { user_id }: AuthedUser,
 ) -> Result<Response, ApiError> {
     let rec: UserRow = sqlx::query_as(
-        r#"SELECT id, email, password_hash, name, avatar_url, twitter_handle, is_email_verified FROM users WHERE id = $1"#,
+        r#"SELECT id, email, password_hash, name, avatar_url, twitter_handle, is_email_verified, has_seed FROM users WHERE id = $1"#,
     )
     .bind(user_id)
     .fetch_one(&state.store.pool)
@@ -574,7 +658,7 @@ async fn forgot_password(
     }
 
     if let Some(rec) = sqlx::query_as::<_, UserRow>(
-        r#"SELECT id, email, password_hash, name, avatar_url, twitter_handle, is_email_verified
+        r#"SELECT id, email, password_hash, name, avatar_url, twitter_handle, is_email_verified, has_seed
            FROM users WHERE email IS NOT NULL AND lower(email) = lower($1)"#,
     )
     .bind(email)
@@ -738,6 +822,35 @@ async fn issue_tokens_and_cookie(
     state: &Arc<AppState>,
     user_id: i64,
 ) -> Result<Response, ApiError> {
+    issue_tokens_and_cookie_with_body(state, user_id, |auth| auth).await
+}
+
+async fn issue_tokens_and_cookie_with_body<T, F>(
+    state: &Arc<AppState>,
+    user_id: i64,
+    build: F,
+) -> Result<Response, ApiError>
+where
+    T: Serialize,
+    F: FnOnce(AuthResponse) -> T,
+{
+    let (auth, refresh) = issue_tokens_inner(state, user_id).await?;
+    let body = build(auth);
+    let mut res = (StatusCode::OK, Json(body)).into_response();
+    res.headers_mut().append(
+        axum::http::header::SET_COOKIE,
+        build_refresh_cookie(state, &refresh)
+            .parse()
+            .map_err(ApiError::internal)?,
+    );
+
+    Ok(res)
+}
+
+async fn issue_tokens_inner(
+    state: &Arc<AppState>,
+    user_id: i64,
+) -> Result<(AuthResponse, String), ApiError> {
     let access =
         trucoshi_auth::jwt::issue_access_jwt(&state.tokens, user_id).map_err(ApiError::internal)?;
 
@@ -760,14 +873,14 @@ async fn issue_tokens_and_cookie(
     .map_err(ApiError::internal)?;
 
     let rec: UserRow = sqlx::query_as(
-        r#"SELECT id, email, password_hash, name, avatar_url, twitter_handle, is_email_verified FROM users WHERE id = $1"#,
+        r#"SELECT id, email, password_hash, name, avatar_url, twitter_handle, is_email_verified, has_seed FROM users WHERE id = $1"#,
     )
     .bind(user_id)
     .fetch_one(&state.store.pool)
     .await
     .map_err(ApiError::internal)?;
 
-    let body = AuthResponse {
+    let auth = AuthResponse {
         access_token: access,
         user: UserDto {
             id: rec.id,
@@ -776,18 +889,11 @@ async fn issue_tokens_and_cookie(
             avatar_url: rec.avatar_url,
             twitter_handle: rec.twitter_handle,
             is_email_verified: rec.is_email_verified,
+            has_seed: rec.has_seed,
         },
     };
 
-    let mut res = (StatusCode::OK, Json(body)).into_response();
-    res.headers_mut().append(
-        axum::http::header::SET_COOKIE,
-        build_refresh_cookie(state, &refresh)
-            .parse()
-            .map_err(ApiError::internal)?,
-    );
-
-    Ok(res)
+    Ok((auth, refresh))
 }
 
 fn build_refresh_cookie(state: &AppState, refresh: &str) -> String {
@@ -826,6 +932,22 @@ fn get_cookie_value(headers: &HeaderMap, cookie_name: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn normalize_seed_phrase(input: &str) -> Result<String, ApiError> {
+    let words: Vec<String> = input
+        .split_whitespace()
+        .map(|w| w.trim().to_lowercase())
+        .filter(|w| !w.is_empty())
+        .collect();
+
+    if words.len() != 5 {
+        return Err(ApiError::bad_request(
+            "seed_phrase must contain exactly 5 words",
+        ));
+    }
+
+    Ok(words.join(" "))
 }
 
 // ===== Tournaments (minimal; no wallets/bets) =====
@@ -1649,7 +1771,13 @@ impl IntoResponse for ApiError {
 mod tests {
     use super::*;
 
-    use axum::{Router, body::Body, extract::State, http::Request, routing::get};
+    use axum::{
+        Router,
+        body::Body,
+        extract::State,
+        http::Request,
+        routing::{get, post},
+    };
     use http_body_util::BodyExt;
     use serde_json::json;
     use std::sync::Arc;
@@ -1720,6 +1848,7 @@ mod tests {
             },
             public_base_url: "http://localhost".into(),
             mailer: Mailer::disabled(),
+            seed_hash_secret: b"test".to_vec(),
             realtime: Realtime::new(),
         });
 
@@ -1802,6 +1931,7 @@ mod tests {
             },
             public_base_url: "http://localhost".into(),
             mailer: Mailer::disabled(),
+            seed_hash_secret: b"test".to_vec(),
             realtime: Realtime::new(),
         });
 
@@ -1956,6 +2086,7 @@ mod tests {
             },
             public_base_url: "http://localhost".into(),
             mailer: Mailer::disabled(),
+            seed_hash_secret: b"test".to_vec(),
             realtime: Realtime::new(),
         });
 
@@ -2139,6 +2270,7 @@ mod tests {
             },
             public_base_url: "http://localhost".into(),
             mailer: Mailer::disabled(),
+            seed_hash_secret: b"test".to_vec(),
             realtime: Realtime::new(),
         });
 
@@ -2204,6 +2336,7 @@ mod tests {
             },
             public_base_url: "http://localhost".into(),
             mailer: Mailer::disabled(),
+            seed_hash_secret: b"test".to_vec(),
             realtime: Realtime::new(),
         });
 
@@ -2272,6 +2405,7 @@ mod tests {
             },
             public_base_url: "http://localhost".into(),
             mailer: Mailer::disabled(),
+            seed_hash_secret: b"test".to_vec(),
             realtime: Realtime::new(),
         });
 
@@ -2349,6 +2483,7 @@ mod tests {
             },
             public_base_url: "http://localhost".into(),
             mailer: Mailer::disabled(),
+            seed_hash_secret: b"test".to_vec(),
             realtime: Realtime::new(),
         });
 
@@ -2376,6 +2511,159 @@ mod tests {
                 .fetch_one(&store.pool)
                 .await?;
         assert_eq!(refresh_count, 0);
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn register_seed_creates_seed_only_user(pool: sqlx::PgPool) -> anyhow::Result<()> {
+        let store = trucoshi_store::Store { pool };
+
+        let state = Arc::new(AppState {
+            store: store.clone(),
+            tokens: trucoshi_auth::tokens::TokenConfig {
+                issuer: "test".into(),
+                audience: "test".into(),
+                access_ttl: Duration::minutes(5),
+                refresh_ttl: Duration::minutes(5),
+                jwt_hs256_secret: vec![0; 32],
+            },
+            cookie: CookieConfig {
+                refresh_cookie_name: "refresh".into(),
+                refresh_cookie_path: "/v1/auth/refresh-tokens".into(),
+                secure: false,
+                same_site: SameSite::Lax,
+            },
+            twitter: TwitterConfig {
+                public_base_url: "http://localhost".into(),
+                client_id: "id".into(),
+                client_secret: "secret".into(),
+            },
+            public_base_url: "http://localhost".into(),
+            mailer: Mailer::disabled(),
+            seed_hash_secret: b"seed-secret".to_vec(),
+            realtime: Realtime::new(),
+        });
+
+        let app = Router::new()
+            .route("/v1/auth/register-seed", post(register_seed))
+            .with_state(state.clone());
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/register-seed")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{ "name": "Seed User" }"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let cookie = res
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .expect("refresh cookie")
+            .to_str()
+            .unwrap();
+        assert!(cookie.contains("refresh"));
+
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let seed_phrase = payload["seed_phrase"].as_str().unwrap();
+        assert_eq!(seed_phrase.split_whitespace().count(), 5);
+
+        let user = &payload["user"];
+        assert_eq!(user["name"], serde_json::json!("Seed User"));
+        assert!(user["has_seed"].as_bool().unwrap());
+        let user_id = user["id"].as_i64().unwrap();
+
+        let (email, password_hash, seed_hash, has_seed): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            bool,
+        ) = sqlx::query_as(
+            "SELECT email, password_hash, seed_hash, has_seed FROM users WHERE id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(&store.pool)
+        .await?;
+
+        assert!(email.is_none());
+        assert!(password_hash.is_none());
+        assert!(seed_hash.is_some());
+        assert!(has_seed);
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn login_seed_normalizes_phrase(pool: sqlx::PgPool) -> anyhow::Result<()> {
+        let store = trucoshi_store::Store { pool };
+        let seed_secret = b"seed-secret".to_vec();
+
+        let seed_phrase = "tango mate truco flor falta";
+        let seed_hash = trucoshi_auth::seed::hash_seed_phrase(seed_phrase, &seed_secret);
+        let user_id: i64 = sqlx::query_scalar(
+            "INSERT INTO users (name, seed_hash, has_seed) VALUES ($1, $2, TRUE) RETURNING id",
+        )
+        .bind("Seed Login")
+        .bind(seed_hash)
+        .fetch_one(&store.pool)
+        .await?;
+
+        let state = Arc::new(AppState {
+            store: store.clone(),
+            tokens: trucoshi_auth::tokens::TokenConfig {
+                issuer: "test".into(),
+                audience: "test".into(),
+                access_ttl: Duration::minutes(5),
+                refresh_ttl: Duration::minutes(5),
+                jwt_hs256_secret: vec![0; 32],
+            },
+            cookie: CookieConfig {
+                refresh_cookie_name: "refresh".into(),
+                refresh_cookie_path: "/v1/auth/refresh-tokens".into(),
+                secure: false,
+                same_site: SameSite::Lax,
+            },
+            twitter: TwitterConfig {
+                public_base_url: "http://localhost".into(),
+                client_id: "id".into(),
+                client_secret: "secret".into(),
+            },
+            public_base_url: "http://localhost".into(),
+            mailer: Mailer::disabled(),
+            seed_hash_secret: seed_secret.clone(),
+            realtime: Realtime::new(),
+        });
+
+        let app = Router::new()
+            .route("/v1/auth/login-seed", post(login_seed))
+            .with_state(state.clone());
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/login-seed")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{ "seed_phrase": "  TANGO   MATE   TRUCO  FLOR   FALTA  " }"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["user"]["id"].as_i64().unwrap(), user_id);
+        assert!(payload["user"]["has_seed"].as_bool().unwrap());
 
         Ok(())
     }

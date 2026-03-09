@@ -32,6 +32,7 @@ Required:
 
 - `DATABASE_URL`
 - `JWT_SECRET`
+- `SEED_HASH_SECRET`
 
 Optional:
 
@@ -43,4 +44,5 @@ Optional:
 Notes:
 
 - `JWT_SECRET` can be plain bytes or base64; the server will try base64 decode and fall back to raw.
+- `SEED_HASH_SECRET` is any random string; keep it constant per environment so seed users can log back in.
 - DB migrations are applied automatically at startup.

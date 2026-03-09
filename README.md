@@ -36,4 +36,5 @@ npm run gen:ws
 - DB migrations are applied automatically on startup.
 - For now, Twitter OAuth env vars are placeholders.
 - Account recovery + verification emails use SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, and EMAIL_FROM; leave them blank (or unset) to disable email in dev.
+- Seed-phrase auth derives deterministic hashes using `SEED_HASH_SECRET`; set it to a stable random string in every environment so register/login-seed stay in sync.
 - See `DEPLOYING.md` for more details.
