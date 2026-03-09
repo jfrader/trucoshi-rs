@@ -104,6 +104,7 @@ pub struct PauseRequestState {
     pub requested_by_team: TeamIdx,
     pub awaiting_team: TeamIdx,
     pub expires_at_ms: i64,
+    pub accepted_seat_idxs: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -1159,6 +1160,7 @@ impl Realtime {
                                 requested_by_team,
                                 awaiting_team,
                                 expires_at_ms,
+                                accepted_seat_idxs: Vec::new(),
                             });
                             m.pending_unpause = None;
                             m.auto_unpause = None;
@@ -1275,7 +1277,8 @@ impl Realtime {
                         return;
                     };
 
-                    if let Some(req) = m.pause_request.clone() {
+                    if let Some(mut req) = m.pause_request.take() {
+                        let mut restore_request = false;
                         if let Some(seat_idx) = m.players.iter().position(|p| p.key == pkey) {
                             let player = m.players.get(seat_idx).cloned().expect("player missing");
                             if player.team != req.awaiting_team {
@@ -1283,67 +1286,98 @@ impl Realtime {
                                     "NOT_PENDING_TEAM".into(),
                                     "not the awaiting team".into(),
                                 ));
+                                restore_request = true;
                             } else if now_ms >= req.expires_at_ms {
-                                m.pause_request = None;
-                                broadcast = true;
                                 err = Some((
                                     "PAUSE_REQUEST_EXPIRED".into(),
                                     "pause request expired".into(),
                                 ));
+                                broadcast = true;
                             } else {
                                 let actor_seat_idx = u8::try_from(seat_idx).unwrap_or(0);
-                                history_actions.push(GameHistoryEvent::GameAction {
-                                    match_id: msid.clone(),
-                                    actor_seat_idx: Some(actor_seat_idx),
-                                    actor_team_idx: Some(player.team.as_u8()),
-                                    actor_user_id: player.user_id,
-                                    ty: "match.pause.vote".into(),
-                                    data: serde_json::json!({
-                                        "server_time_ms": now_ms,
-                                        "accept": accept,
-                                        "awaiting_team": req.awaiting_team.as_u8(),
-                                        "requested_by_team": req.requested_by_team.as_u8(),
-                                    }),
-                                });
-
-                                if !accept {
-                                    m.pause_request = None;
-                                    broadcast = true;
+                                if req
+                                    .accepted_seat_idxs
+                                    .iter()
+                                    .any(|idx| *idx == actor_seat_idx)
+                                {
+                                    err = Some((
+                                        "ALREADY_VOTED".into(),
+                                        "pause vote already recorded".into(),
+                                    ));
+                                    restore_request = true;
                                 } else {
-                                    m.pause_request = None;
-                                    m.pending_unpause = None;
-                                    m.phase = MatchPhase::Paused;
-                                    broadcast = true;
-
-                                    let delay_ms = m.options.abandon_time_ms.max(1);
-                                    let auto_token = Uuid::new_v4();
-                                    m.auto_unpause = Some(AutoUnpauseState {
-                                        token: auto_token,
-                                        trigger_at_ms: now_ms + delay_ms,
-                                        paused_by_team: req.requested_by_team,
-                                    });
-                                    spawn_auto = Some((msid.clone(), auto_token, delay_ms));
-
-                                    let actor =
-                                        m.players.get(req.requested_by_seat_idx as usize).cloned();
+                                    let awaiting_team_size = m
+                                        .players
+                                        .iter()
+                                        .filter(|p| p.team == req.awaiting_team)
+                                        .count()
+                                        .max(1);
 
                                     history_actions.push(GameHistoryEvent::GameAction {
                                         match_id: msid.clone(),
-                                        actor_seat_idx: actor
-                                            .as_ref()
-                                            .map(|_| req.requested_by_seat_idx),
-                                        actor_team_idx: actor.map(|p| p.team.as_u8()),
-                                        actor_user_id: req.requested_by_user_id,
-                                        ty: "match.pause".into(),
+                                        actor_seat_idx: Some(actor_seat_idx),
+                                        actor_team_idx: Some(player.team.as_u8()),
+                                        actor_user_id: player.user_id,
+                                        ty: "match.pause.vote".into(),
                                         data: serde_json::json!({
                                             "server_time_ms": now_ms,
-                                            "requires_vote": true,
+                                            "accept": accept,
+                                            "awaiting_team": req.awaiting_team.as_u8(),
+                                            "requested_by_team": req.requested_by_team.as_u8(),
                                         }),
                                     });
+
+                                    if !accept {
+                                        broadcast = true;
+                                    } else {
+                                        req.accepted_seat_idxs.push(actor_seat_idx);
+                                        req.accepted_seat_idxs.sort_unstable();
+                                        broadcast = true;
+
+                                        if req.accepted_seat_idxs.len() >= awaiting_team_size {
+                                            let actor = m
+                                                .players
+                                                .get(req.requested_by_seat_idx as usize)
+                                                .cloned();
+
+                                            history_actions.push(GameHistoryEvent::GameAction {
+                                                match_id: msid.clone(),
+                                                actor_seat_idx: actor
+                                                    .as_ref()
+                                                    .map(|_| req.requested_by_seat_idx),
+                                                actor_team_idx: actor.map(|p| p.team.as_u8()),
+                                                actor_user_id: req.requested_by_user_id,
+                                                ty: "match.pause".into(),
+                                                data: serde_json::json!({
+                                                    "server_time_ms": now_ms,
+                                                    "requires_vote": true,
+                                                }),
+                                            });
+
+                                            m.pending_unpause = None;
+                                            m.phase = MatchPhase::Paused;
+
+                                            let delay_ms = m.options.abandon_time_ms.max(1);
+                                            let auto_token = Uuid::new_v4();
+                                            m.auto_unpause = Some(AutoUnpauseState {
+                                                token: auto_token,
+                                                trigger_at_ms: now_ms + delay_ms,
+                                                paused_by_team: req.requested_by_team,
+                                            });
+                                            spawn_auto = Some((msid.clone(), auto_token, delay_ms));
+                                        } else {
+                                            restore_request = true;
+                                        }
+                                    }
                                 }
                             }
                         } else {
                             err = Some(("PLAYER_NOT_FOUND".into(), "player seat missing".into()));
+                            restore_request = true;
+                        }
+
+                        if restore_request {
+                            m.pause_request = Some(req);
                         }
                     } else {
                         err = Some(("NO_PAUSE_REQUEST".into(), "no pause request pending".into()));
@@ -3088,6 +3122,7 @@ impl Realtime {
                 awaiting_team: req.awaiting_team,
                 requested_by_seat_idx: req.requested_by_seat_idx,
                 expires_at_ms: req.expires_at_ms,
+                accepted_seat_idxs: req.accepted_seat_idxs.clone(),
             })),
             pending_unpause: Maybe(m.pending_unpause.as_ref().map(|pending| {
                 PublicPendingUnpause {
@@ -5610,6 +5645,189 @@ mod e2e_smoke_tests {
             let m = s.matches.get(&match_id).expect("match exists");
             assert_eq!(m.phase, MatchPhase::Started);
             assert!(m.pending_unpause.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn match_pause_requires_all_opponents_to_accept() {
+        use tokio::time::{Duration, timeout};
+
+        let rt = Realtime::new();
+        let (owner, mut rx_owner) = add_session(&rt, 230).await;
+        let (ally, mut rx_ally) = add_session(&rt, 231).await;
+        let (opp_a, mut rx_opp_a) = add_session(&rt, 232).await;
+        let (opp_b, mut rx_opp_b) = add_session(&rt, 233).await;
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchCreate(MatchCreateData {
+                    name: "owner".into(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                    options: Some(MatchOptions {
+                        max_players: 4,
+                        match_points: 1,
+                        turn_time_ms: 30_000,
+                        ..MatchOptions::default()
+                    })
+                    .into(),
+                }),
+            },
+        )
+        .await;
+
+        let match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&owner)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("creator should be in a match")
+        };
+
+        for (sid, name, team) in [
+            (ally, "ally", TeamIdx::TEAM_0),
+            (opp_a, "opp_a", TeamIdx::TEAM_1),
+            (opp_b, "opp_b", TeamIdx::TEAM_1),
+        ] {
+            rt.handle_message(
+                sid,
+                WsInMessage {
+                    v: Default::default(),
+                    id: Default::default(),
+                    msg: C2sMessage::MatchJoin(MatchJoinData {
+                        match_id: match_id.clone(),
+                        name: name.into(),
+                        team: Some(team).into(),
+                    }),
+                },
+            )
+            .await;
+        }
+
+        for sid in [owner, ally, opp_a, opp_b] {
+            rt.handle_message(
+                sid,
+                WsInMessage {
+                    v: Default::default(),
+                    id: Default::default(),
+                    msg: C2sMessage::MatchReady(MatchReadyData {
+                        match_id: match_id.clone(),
+                        ready: true,
+                    }),
+                },
+            )
+            .await;
+        }
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchStart(MatchRefData {
+                    match_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+
+        drain_receiver(&mut rx_owner);
+        drain_receiver(&mut rx_ally);
+        drain_receiver(&mut rx_opp_a);
+        drain_receiver(&mut rx_opp_b);
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchPause(MatchRefData {
+                    match_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+
+        let seat_idx_opp_a = {
+            let s = rt.state.lock().await;
+            let m = s.matches.get(&match_id).expect("match exists");
+            m.players
+                .iter()
+                .position(|p| p.user_id == 232)
+                .map(|idx| u8::try_from(idx).unwrap_or(0))
+                .expect("opp a seat")
+        };
+
+        rt.handle_message(
+            opp_a,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchPauseVote(MatchPauseVoteData {
+                    match_id: match_id.clone(),
+                    accept: true,
+                }),
+            },
+        )
+        .await;
+
+        {
+            let s = rt.state.lock().await;
+            let m = s.matches.get(&match_id).expect("match exists");
+            assert_eq!(m.phase, MatchPhase::Started);
+            let req = m.pause_request.as_ref().expect("pause still pending");
+            assert_eq!(req.accepted_seat_idxs, vec![seat_idx_opp_a]);
+        }
+
+        drain_receiver(&mut rx_opp_a);
+
+        rt.handle_message(
+            opp_a,
+            WsInMessage {
+                v: Default::default(),
+                id: Some("dup_vote".into()).into(),
+                msg: C2sMessage::MatchPauseVote(MatchPauseVoteData {
+                    match_id: match_id.clone(),
+                    accept: true,
+                }),
+            },
+        )
+        .await;
+
+        let dup = timeout(Duration::from_millis(250), rx_opp_a.recv())
+            .await
+            .expect("duplicate vote response")
+            .expect("rx open");
+        assert_eq!(dup.id.0.as_deref(), Some("dup_vote"));
+        match dup.msg {
+            S2cMessage::Error(ErrorPayload { code, .. }) => {
+                assert_eq!(code, "ALREADY_VOTED");
+            }
+            other => panic!("expected duplicate vote error, got {other:?}"),
+        }
+
+        drain_receiver(&mut rx_opp_a);
+
+        rt.handle_message(
+            opp_b,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchPauseVote(MatchPauseVoteData {
+                    match_id: match_id.clone(),
+                    accept: true,
+                }),
+            },
+        )
+        .await;
+
+        {
+            let s = rt.state.lock().await;
+            let m = s.matches.get(&match_id).expect("match exists");
+            assert_eq!(m.phase, MatchPhase::Paused);
+            assert!(m.pause_request.is_none());
         }
     }
 

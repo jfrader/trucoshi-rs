@@ -220,6 +220,7 @@ export interface MatchOptions {
  * Pending pause request metadata exposed in `PublicMatch`.
  */
 export interface PublicPauseRequest {
+  accepted_seat_idxs?: number[];
   awaiting_team: TeamIdx;
   expires_at_ms: number;
   requested_by_seat_idx: number;

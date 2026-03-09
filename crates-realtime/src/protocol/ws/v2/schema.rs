@@ -405,6 +405,8 @@ pub struct PublicPauseRequest {
     pub awaiting_team: TeamIdx,
     pub requested_by_seat_idx: u8,
     pub expires_at_ms: i64,
+    #[serde(default)]
+    pub accepted_seat_idxs: Vec<u8>,
 }
 
 /// Pending unpause countdown metadata.

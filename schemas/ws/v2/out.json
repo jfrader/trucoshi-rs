@@ -809,6 +809,15 @@
         "requested_by_team"
       ],
       "properties": {
+        "accepted_seat_idxs": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          }
+        },
         "awaiting_team": {
           "$ref": "#/definitions/TeamIdx"
         },
