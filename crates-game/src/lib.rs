@@ -103,6 +103,13 @@ pub enum PointsAwardReason {
     EnvidoAccepted,
     EnvidoFaltaAccepted,
     EnvidoDeclined,
+    FlorUnopposed,
+    FlorAccepted,
+    FlorDeclined,
+    FlorContraAccepted,
+    FlorContraDeclined,
+    FlorContraAlRestoAccepted,
+    FlorContraAlRestoDeclined,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +127,25 @@ enum EnvidoSequence {
     RealEnvido,
     /// The last raise was Falta Envido.
     FaltaEnvido,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlorStage {
+    /// Waiting for the opposing team to answer the initial Flor call.
+    AwaitOpponentFlor,
+    /// Waiting for the original callers to answer a Contra Flor raise.
+    AwaitContraFlorAnswer,
+    /// Waiting for the opposing team to answer a Contra Flor al Resto raise.
+    AwaitContraFlorAlRestoAnswer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FlorPending {
+    stage: FlorStage,
+    caller_team_idx: u8,
+    responder_team_idx: u8,
+    stake_points: u16,
+    decline_points: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +186,8 @@ struct PendingCall {
     envido_is_falta: bool,
     /// Tracks which Envido-family command was spoken last.
     envido_sequence: Option<EnvidoSequence>,
+    /// Flor-specific pending state (if any).
+    flor: Option<FlorPending>,
 }
 
 /// Minimal, migration-friendly in-memory game state.
@@ -277,8 +305,7 @@ impl GameState {
 
         let hs = self.public.hand_state;
 
-        let hand = self.hands.get(player_idx).cloned().unwrap_or_default();
-        let has_flor = has_flor(&hand);
+        let has_flor = self.player_has_flor(player_idx);
 
         let any_card_played = self.used_hands.iter().any(|u| !u.is_empty());
 
@@ -295,11 +322,7 @@ impl GameState {
                     ]);
 
                     if flor_enabled && has_flor {
-                        v.extend([
-                            GameCommand::Flor,
-                            GameCommand::ContraFlor,
-                            GameCommand::ContraFlorAlResto,
-                        ]);
+                        v.push(GameCommand::Flor);
                     }
                 }
 
@@ -314,8 +337,41 @@ impl GameState {
 
                 v
             }
-            WaitingForTrucoAnswer | WaitingFlorAnswer => {
-                vec![GameCommand::Quiero, GameCommand::NoQuiero]
+            WaitingForTrucoAnswer => vec![GameCommand::Quiero, GameCommand::NoQuiero],
+            WaitingFlorAnswer => {
+                if let Some(pending) = &self.pending_call {
+                    if pending.kind == PendingCallKind::Flor {
+                        if let Some(flor) = pending.flor {
+                            match flor.stage {
+                                FlorStage::AwaitOpponentFlor => {
+                                    let mut cmds = vec![GameCommand::NoQuiero];
+                                    if has_flor {
+                                        cmds.push(GameCommand::Flor);
+                                        cmds.push(GameCommand::ContraFlor);
+                                        cmds.push(GameCommand::ContraFlorAlResto);
+                                    }
+                                    cmds
+                                }
+                                FlorStage::AwaitContraFlorAnswer => {
+                                    let mut cmds = vec![GameCommand::Quiero, GameCommand::NoQuiero];
+                                    if has_flor {
+                                        cmds.push(GameCommand::ContraFlorAlResto);
+                                    }
+                                    cmds
+                                }
+                                FlorStage::AwaitContraFlorAlRestoAnswer => {
+                                    vec![GameCommand::Quiero, GameCommand::NoQuiero]
+                                }
+                            }
+                        } else {
+                            vec![GameCommand::Quiero, GameCommand::NoQuiero]
+                        }
+                    } else {
+                        vec![GameCommand::Quiero, GameCommand::NoQuiero]
+                    }
+                } else {
+                    vec![GameCommand::Quiero, GameCommand::NoQuiero]
+                }
             }
             WaitingEnvidoAnswer => {
                 let mut v = Vec::<GameCommand>::new();
@@ -339,6 +395,156 @@ impl GameState {
             }
             WaitingEnvidoPointsAnswer => vec![GameCommand::SonBuenas],
             DisplayFlorBattle | DisplayPreviousHand | Finished => vec![],
+        }
+    }
+
+    fn player_cards(&self, player_idx: usize) -> Vec<String> {
+        let mut cards: Vec<String> = Vec::new();
+        if let Some(hand) = self.hands.get(player_idx) {
+            cards.extend(hand.iter().cloned());
+        }
+        if let Some(used) = self.used_hands.get(player_idx) {
+            cards.extend(used.iter().cloned());
+        }
+        cards
+    }
+
+    fn player_has_flor(&self, player_idx: usize) -> bool {
+        let cards = self.player_cards(player_idx);
+        has_flor(&cards)
+    }
+
+    fn player_flor_value(&self, player_idx: usize) -> Option<i32> {
+        let cards = self.player_cards(player_idx);
+        if !has_flor(&cards) {
+            return None;
+        }
+        let value: i32 = cards.iter().map(|c| split_card(c).envido_value).sum();
+        Some(value + 20)
+    }
+
+    fn team_has_flor(&self, team_idx: u8, teams_by_player_idx: &[u8]) -> bool {
+        teams_by_player_idx
+            .iter()
+            .enumerate()
+            .any(|(idx, team)| *team == team_idx && self.player_has_flor(idx))
+    }
+
+    fn best_flor_for_team(&self, team_idx: u8, teams_by_player_idx: &[u8]) -> Option<(i32, u8)> {
+        let mut best: Option<(i32, u8)> = None;
+        for (idx, team) in teams_by_player_idx.iter().enumerate() {
+            if *team != team_idx {
+                continue;
+            }
+            if let Some(value) = self.player_flor_value(idx) {
+                best = match best {
+                    None => Some((value, idx as u8)),
+                    Some((best_value, best_seat)) => {
+                        if value > best_value {
+                            Some((value, idx as u8))
+                        } else if value == best_value
+                            && self.seat_precedence_from_forehand(idx as u8)
+                                < self.seat_precedence_from_forehand(best_seat)
+                        {
+                            Some((value, idx as u8))
+                        } else {
+                            Some((best_value, best_seat))
+                        }
+                    }
+                };
+            }
+        }
+        best
+    }
+
+    fn flor_winner_team(&self, teams_by_player_idx: &[u8]) -> Option<u8> {
+        let best_team0 = self.best_flor_for_team(0, teams_by_player_idx);
+        let best_team1 = self.best_flor_for_team(1, teams_by_player_idx);
+
+        match (best_team0, best_team1) {
+            (Some((value0, seat0)), Some((value1, seat1))) => match value0.cmp(&value1) {
+                core::cmp::Ordering::Greater => Some(0),
+                core::cmp::Ordering::Less => Some(1),
+                core::cmp::Ordering::Equal => {
+                    let pref0 = self.seat_precedence_from_forehand(seat0);
+                    let pref1 = self.seat_precedence_from_forehand(seat1);
+                    if pref0 <= pref1 { Some(0) } else { Some(1) }
+                }
+            },
+            (Some(_), None) => Some(0),
+            (None, Some(_)) => Some(1),
+            _ => None,
+        }
+    }
+
+    fn contra_flor_al_resto_points(match_points: u8, current_team_points: [u8; 2]) -> u16 {
+        let target = (match_points.max(1) as u16).saturating_mul(2);
+        let lower = current_team_points
+            .iter()
+            .copied()
+            .map(|p| p as u16)
+            .min()
+            .unwrap_or(0);
+        let mut stake = target.saturating_sub(lower);
+        if stake == 0 {
+            stake = target;
+        }
+        stake.max(1)
+    }
+
+    fn flor_accept_outcome(
+        &mut self,
+        pending: PendingCall,
+        teams_by_player_idx: &[u8],
+        stake_points: u16,
+        reason: PointsAwardReason,
+        turn_time_ms: i64,
+        now_ms: i64,
+    ) -> CommandOutcome {
+        let winner = self
+            .flor_winner_team(teams_by_player_idx)
+            .or_else(|| pending.flor.map(|f| f.caller_team_idx))
+            .unwrap_or(0);
+
+        self.turn_idx = pending.resume_turn_idx;
+        self.public.turn_seat_idx = pending.resume_turn_idx;
+        self.turn_expires_at_ms = now_ms.saturating_add(turn_time_ms.max(0));
+        self.public.hand_state = HandState::WaitingPlay;
+        self.pending_call = None;
+
+        CommandOutcome::PointsAwarded {
+            winner_team_idx: winner,
+            points: stake_points.min(u8::MAX as u16) as u8,
+            reason,
+        }
+    }
+
+    fn flor_decline_outcome(
+        &mut self,
+        pending: PendingCall,
+        teams_by_player_idx: &[u8],
+        points: u16,
+        reason: PointsAwardReason,
+        turn_time_ms: i64,
+        now_ms: i64,
+    ) -> CommandOutcome {
+        let winner = pending.flor.map(|f| f.caller_team_idx).unwrap_or_else(|| {
+            teams_by_player_idx
+                .get(pending.caller_idx as usize)
+                .copied()
+                .unwrap_or(0)
+        });
+
+        self.turn_idx = pending.resume_turn_idx;
+        self.public.turn_seat_idx = pending.resume_turn_idx;
+        self.turn_expires_at_ms = now_ms.saturating_add(turn_time_ms.max(0));
+        self.public.hand_state = HandState::WaitingPlay;
+        self.pending_call = None;
+
+        CommandOutcome::PointsAwarded {
+            winner_team_idx: winner,
+            points: points.min(u8::MAX as u16) as u8,
+            reason,
         }
     }
 
@@ -498,6 +704,15 @@ impl GameState {
 
         self.apply_hand_state_hint(cmd);
 
+        if matches!(
+            cmd,
+            GameCommand::Flor | GameCommand::ContraFlor | GameCommand::ContraFlorAlResto
+        ) && !self.player_has_flor(from_player_idx)
+        {
+            self.public.hand_state = prev_state;
+            return CommandOutcome::None;
+        }
+
         // If this command begins a call/response exchange (truco/envido/flor), switch the turn
         // to the opponent so the UI reflects who's expected to answer.
         if prev_state == WaitingPlay {
@@ -520,7 +735,17 @@ impl GameState {
                     if kind == PendingCallKind::Truco && truco_target_value == 0 {
                         // No state change.
                     } else {
-                        self.pending_call = Some(PendingCall {
+                        let caller_team_idx = teams_by_player_idx
+                            .get(from_player_idx)
+                            .copied()
+                            .unwrap_or(0);
+                        let responder = next_opponent_idx(caller_idx, teams_by_player_idx);
+                        let responder_team_idx = teams_by_player_idx
+                            .get(responder as usize)
+                            .copied()
+                            .unwrap_or_else(|| if caller_team_idx == 0 { 1 } else { 0 });
+
+                        let mut pending = PendingCall {
                             kind,
                             caller_idx,
                             resume_turn_idx: prev_turn,
@@ -539,12 +764,59 @@ impl GameState {
                             },
                             envido_is_falta: matches!(cmd, GameCommand::FaltaEnvido),
                             envido_sequence: envido_sequence_after(None, cmd),
-                        });
+                            flor: None,
+                        };
 
-                        let responder = next_opponent_idx(caller_idx, teams_by_player_idx);
-                        self.turn_idx = responder;
-                        self.public.turn_seat_idx = responder;
-                        self.turn_expires_at_ms = now_ms.saturating_add(turn_time_ms.max(0));
+                        if kind == PendingCallKind::Flor {
+                            pending.flor = Some(FlorPending {
+                                stage: FlorStage::AwaitOpponentFlor,
+                                caller_team_idx,
+                                responder_team_idx,
+                                stake_points: 4,
+                                decline_points: 3,
+                            });
+                        }
+
+                        self.pending_call = Some(pending);
+
+                        if kind == PendingCallKind::Flor {
+                            let should_award_immediately = {
+                                let pending = self.pending_call.as_ref().unwrap();
+                                pending
+                                    .flor
+                                    .map(|flor| {
+                                        !self.team_has_flor(
+                                            flor.responder_team_idx,
+                                            teams_by_player_idx,
+                                        )
+                                    })
+                                    .unwrap_or(false)
+                            };
+
+                            if should_award_immediately {
+                                if let Some(pending) = self.pending_call.take() {
+                                    self.turn_idx = pending.resume_turn_idx;
+                                    self.public.turn_seat_idx = pending.resume_turn_idx;
+                                    self.turn_expires_at_ms =
+                                        now_ms.saturating_add(turn_time_ms.max(0));
+                                    self.public.hand_state = HandState::WaitingPlay;
+
+                                    if let Some(flor) = pending.flor {
+                                        return CommandOutcome::PointsAwarded {
+                                            winner_team_idx: flor.caller_team_idx,
+                                            points: 3,
+                                            reason: PointsAwardReason::FlorUnopposed,
+                                        };
+                                    }
+                                }
+                            }
+                        }
+
+                        if self.pending_call.is_some() {
+                            self.turn_idx = responder;
+                            self.public.turn_seat_idx = responder;
+                            self.turn_expires_at_ms = now_ms.saturating_add(turn_time_ms.max(0));
+                        }
                     }
                 }
             }
@@ -636,6 +908,223 @@ impl GameState {
             }
 
             // Declining truco ends the hand; award the hand to the *requesting* team.
+            (WaitingFlorAnswer, GameCommand::Flor) => {
+                let Some(pending) = self.pending_call.take() else {
+                    return CommandOutcome::None;
+                };
+
+                if pending.kind != PendingCallKind::Flor {
+                    self.pending_call = Some(pending);
+                    return CommandOutcome::None;
+                }
+
+                let Some(flor) = pending.flor else {
+                    self.pending_call = Some(pending);
+                    return CommandOutcome::None;
+                };
+
+                let actor_team = teams_by_player_idx
+                    .get(from_player_idx)
+                    .copied()
+                    .unwrap_or(0);
+
+                if flor.stage == FlorStage::AwaitOpponentFlor
+                    && actor_team == flor.responder_team_idx
+                {
+                    return self.flor_accept_outcome(
+                        pending,
+                        teams_by_player_idx,
+                        flor.stake_points,
+                        PointsAwardReason::FlorAccepted,
+                        turn_time_ms,
+                        now_ms,
+                    );
+                }
+
+                self.pending_call = Some(pending);
+                CommandOutcome::None
+            }
+
+            (WaitingFlorAnswer, GameCommand::ContraFlor) => {
+                if let Some(pending) = self.pending_call.as_mut() {
+                    if pending.kind != PendingCallKind::Flor {
+                        return CommandOutcome::None;
+                    }
+
+                    let Some(mut flor) = pending.flor else {
+                        return CommandOutcome::None;
+                    };
+
+                    let actor_team = teams_by_player_idx
+                        .get(from_player_idx)
+                        .copied()
+                        .unwrap_or(0);
+
+                    if flor.stage != FlorStage::AwaitOpponentFlor
+                        || actor_team != flor.responder_team_idx
+                    {
+                        return CommandOutcome::None;
+                    }
+
+                    flor.stage = FlorStage::AwaitContraFlorAnswer;
+                    flor.caller_team_idx = actor_team;
+                    flor.responder_team_idx = if actor_team == 0 { 1 } else { 0 };
+                    flor.stake_points = 6;
+                    flor.decline_points = 4;
+                    pending.caller_idx =
+                        u8::try_from(from_player_idx).unwrap_or(pending.caller_idx);
+                    pending.flor = Some(flor);
+
+                    let responder = next_opponent_idx(pending.caller_idx, teams_by_player_idx);
+                    self.turn_idx = responder;
+                    self.public.turn_seat_idx = responder;
+                    self.turn_expires_at_ms = now_ms.saturating_add(turn_time_ms.max(0));
+                }
+
+                CommandOutcome::None
+            }
+
+            (WaitingFlorAnswer, GameCommand::ContraFlorAlResto) => {
+                if let Some(pending) = self.pending_call.as_mut() {
+                    if pending.kind != PendingCallKind::Flor {
+                        return CommandOutcome::None;
+                    }
+
+                    let Some(mut flor) = pending.flor else {
+                        return CommandOutcome::None;
+                    };
+
+                    let actor_team = teams_by_player_idx
+                        .get(from_player_idx)
+                        .copied()
+                        .unwrap_or(0);
+
+                    let stage_allows = match flor.stage {
+                        FlorStage::AwaitOpponentFlor | FlorStage::AwaitContraFlorAnswer => {
+                            actor_team == flor.responder_team_idx
+                        }
+                        FlorStage::AwaitContraFlorAlRestoAnswer => false,
+                    };
+
+                    if !stage_allows {
+                        return CommandOutcome::None;
+                    }
+
+                    flor.stage = FlorStage::AwaitContraFlorAlRestoAnswer;
+                    flor.caller_team_idx = actor_team;
+                    flor.responder_team_idx = if actor_team == 0 { 1 } else { 0 };
+                    flor.stake_points =
+                        Self::contra_flor_al_resto_points(match_points, current_team_points);
+                    flor.decline_points = 6;
+                    pending.caller_idx =
+                        u8::try_from(from_player_idx).unwrap_or(pending.caller_idx);
+                    pending.flor = Some(flor);
+
+                    let responder = next_opponent_idx(pending.caller_idx, teams_by_player_idx);
+                    self.turn_idx = responder;
+                    self.public.turn_seat_idx = responder;
+                    self.turn_expires_at_ms = now_ms.saturating_add(turn_time_ms.max(0));
+                }
+
+                CommandOutcome::None
+            }
+
+            (WaitingFlorAnswer, GameCommand::Quiero) => {
+                let Some(pending) = self.pending_call.take() else {
+                    return CommandOutcome::None;
+                };
+
+                if pending.kind != PendingCallKind::Flor {
+                    self.pending_call = Some(pending);
+                    return CommandOutcome::None;
+                }
+
+                let Some(flor) = pending.flor else {
+                    self.pending_call = Some(pending);
+                    return CommandOutcome::None;
+                };
+
+                let actor_team = teams_by_player_idx
+                    .get(from_player_idx)
+                    .copied()
+                    .unwrap_or(0);
+
+                if actor_team != flor.responder_team_idx {
+                    self.pending_call = Some(pending);
+                    return CommandOutcome::None;
+                }
+
+                match flor.stage {
+                    FlorStage::AwaitContraFlorAnswer => {
+                        return self.flor_accept_outcome(
+                            pending,
+                            teams_by_player_idx,
+                            flor.stake_points,
+                            PointsAwardReason::FlorContraAccepted,
+                            turn_time_ms,
+                            now_ms,
+                        );
+                    }
+                    FlorStage::AwaitContraFlorAlRestoAnswer => {
+                        return self.flor_accept_outcome(
+                            pending,
+                            teams_by_player_idx,
+                            flor.stake_points,
+                            PointsAwardReason::FlorContraAlRestoAccepted,
+                            turn_time_ms,
+                            now_ms,
+                        );
+                    }
+                    FlorStage::AwaitOpponentFlor => {
+                        self.pending_call = Some(pending);
+                        CommandOutcome::None
+                    }
+                }
+            }
+
+            (WaitingFlorAnswer, GameCommand::NoQuiero) => {
+                let Some(pending) = self.pending_call.take() else {
+                    return CommandOutcome::None;
+                };
+
+                if pending.kind != PendingCallKind::Flor {
+                    self.pending_call = Some(pending);
+                    return CommandOutcome::None;
+                }
+
+                let Some(flor) = pending.flor else {
+                    self.pending_call = Some(pending);
+                    return CommandOutcome::None;
+                };
+
+                let actor_team = teams_by_player_idx
+                    .get(from_player_idx)
+                    .copied()
+                    .unwrap_or(0);
+
+                if actor_team != flor.responder_team_idx {
+                    self.pending_call = Some(pending);
+                    return CommandOutcome::None;
+                }
+
+                let reason = match flor.stage {
+                    FlorStage::AwaitOpponentFlor => PointsAwardReason::FlorDeclined,
+                    FlorStage::AwaitContraFlorAnswer => PointsAwardReason::FlorContraDeclined,
+                    FlorStage::AwaitContraFlorAlRestoAnswer => {
+                        PointsAwardReason::FlorContraAlRestoDeclined
+                    }
+                };
+
+                return self.flor_decline_outcome(
+                    pending,
+                    teams_by_player_idx,
+                    flor.decline_points,
+                    reason,
+                    turn_time_ms,
+                    now_ms,
+                );
+            }
+
             (WaitingForTrucoAnswer, GameCommand::NoQuiero) => {
                 let pending = self.pending_call.take();
 
@@ -682,7 +1171,7 @@ impl GameState {
 
             // Generic answers just resume play (and restore the pre-call turn seat).
             (
-                WaitingForTrucoAnswer | WaitingEnvidoPointsAnswer | WaitingFlorAnswer,
+                WaitingForTrucoAnswer | WaitingEnvidoPointsAnswer,
                 GameCommand::Quiero | GameCommand::NoQuiero,
             ) => {
                 if let Some(p) = self.pending_call.take() {
@@ -1116,6 +1605,12 @@ fn resolve_hand_winner(trick_results: &[Option<u8>], forehand_team_idx: u8) -> O
 mod tests {
     use super::*;
 
+    fn set_hand(g: &mut GameState, idx: usize, cards: &[&str]) {
+        if let Some(hand) = g.hands.get_mut(idx) {
+            *hand = cards.iter().map(|c| c.to_string()).collect();
+        }
+    }
+
     #[test]
     fn deal_hands_is_deterministic_for_same_seed() {
         let h1 = deal_hands(4, 3, 123);
@@ -1369,7 +1864,7 @@ mod tests {
 
         let cmds_with_flor = g.possible_commands_for_player(0, true);
         assert!(cmds_with_flor.contains(&GameCommand::Flor));
-        assert!(cmds_with_flor.contains(&GameCommand::ContraFlor));
+        assert!(!cmds_with_flor.contains(&GameCommand::ContraFlor));
 
         let cmds_without_flor = g.possible_commands_for_player(0, false);
         assert!(!cmds_without_flor.iter().any(|c| matches!(
@@ -1548,6 +2043,281 @@ mod tests {
                 winner_team_idx: 0,
                 points: 16,
                 reason: PointsAwardReason::EnvidoFaltaAccepted,
+            }
+        );
+    }
+    #[test]
+    fn flor_unopposed_auto_awards_three_points() {
+        let now = 1_000i64;
+        let mut g = GameState::new_with_forehand(2, 42, 10_000, now, 0);
+        let teams = vec![0u8, 1u8];
+
+        set_hand(&mut g, 0, &["1e", "7e", "3e"]);
+        set_hand(&mut g, 1, &["1o", "7c", "3b"]);
+
+        let outcome = g.apply_command(
+            GameCommand::Flor,
+            0,
+            &teams,
+            12,
+            [0, 0],
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
+
+        assert_eq!(g.public.hand_state, HandState::WaitingPlay);
+        assert_eq!(
+            outcome,
+            CommandOutcome::PointsAwarded {
+                winner_team_idx: 0,
+                points: 3,
+                reason: PointsAwardReason::FlorUnopposed,
+            }
+        );
+    }
+
+    #[test]
+    fn flor_decline_without_raise_awards_three_points() {
+        let now = 1_000i64;
+        let mut g = GameState::new_with_forehand(2, 42, 10_000, now, 0);
+        let teams = vec![0u8, 1u8];
+
+        set_hand(&mut g, 0, &["1e", "7e", "3e"]);
+        set_hand(&mut g, 1, &["1o", "7o", "3o"]);
+
+        let first = g.apply_command(
+            GameCommand::Flor,
+            0,
+            &teams,
+            12,
+            [0, 0],
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
+        assert!(matches!(first, CommandOutcome::None));
+
+        let outcome = g.apply_command(
+            GameCommand::NoQuiero,
+            1,
+            &teams,
+            12,
+            [0, 0],
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
+
+        assert_eq!(
+            outcome,
+            CommandOutcome::PointsAwarded {
+                winner_team_idx: 0,
+                points: 3,
+                reason: PointsAwardReason::FlorDeclined,
+            }
+        );
+        assert_eq!(g.public.hand_state, HandState::WaitingPlay);
+    }
+
+    #[test]
+    fn flor_accept_awards_four_points_to_best_team() {
+        let now = 1_000i64;
+        let mut g = GameState::new_with_forehand(2, 42, 10_000, now, 0);
+        let teams = vec![0u8, 1u8];
+
+        set_hand(&mut g, 0, &["1e", "7e", "3e"]);
+        set_hand(&mut g, 1, &["7o", "6o", "5o"]);
+
+        g.apply_command(
+            GameCommand::Flor,
+            0,
+            &teams,
+            12,
+            [0, 0],
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
+        let outcome = g.apply_command(
+            GameCommand::Flor,
+            1,
+            &teams,
+            12,
+            [0, 0],
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
+
+        assert_eq!(
+            outcome,
+            CommandOutcome::PointsAwarded {
+                winner_team_idx: 1,
+                points: 4,
+                reason: PointsAwardReason::FlorAccepted,
+            }
+        );
+    }
+
+    #[test]
+    fn contra_flor_decline_awards_four_points() {
+        let now = 1_000i64;
+        let mut g = GameState::new_with_forehand(2, 42, 10_000, now, 0);
+        let teams = vec![0u8, 1u8];
+
+        set_hand(&mut g, 0, &["1e", "7e", "3e"]);
+        set_hand(&mut g, 1, &["7o", "6o", "5o"]);
+
+        g.apply_command(
+            GameCommand::Flor,
+            0,
+            &teams,
+            12,
+            [0, 0],
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
+        g.apply_command(
+            GameCommand::ContraFlor,
+            1,
+            &teams,
+            12,
+            [0, 0],
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
+        let outcome = g.apply_command(
+            GameCommand::NoQuiero,
+            0,
+            &teams,
+            12,
+            [0, 0],
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
+
+        assert_eq!(
+            outcome,
+            CommandOutcome::PointsAwarded {
+                winner_team_idx: 1,
+                points: 4,
+                reason: PointsAwardReason::FlorContraDeclined,
+            }
+        );
+    }
+
+    #[test]
+    fn contra_flor_accept_awards_six_points_to_best_team() {
+        let now = 1_000i64;
+        let mut g = GameState::new_with_forehand(2, 42, 10_000, now, 0);
+        let teams = vec![0u8, 1u8];
+
+        set_hand(&mut g, 0, &["1e", "7e", "3e"]);
+        set_hand(&mut g, 1, &["7o", "6o", "5o"]);
+
+        g.apply_command(
+            GameCommand::Flor,
+            0,
+            &teams,
+            12,
+            [0, 0],
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
+        g.apply_command(
+            GameCommand::ContraFlor,
+            1,
+            &teams,
+            12,
+            [0, 0],
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
+        let outcome = g.apply_command(
+            GameCommand::Quiero,
+            0,
+            &teams,
+            12,
+            [0, 0],
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
+
+        assert_eq!(
+            outcome,
+            CommandOutcome::PointsAwarded {
+                winner_team_idx: 1,
+                points: 6,
+                reason: PointsAwardReason::FlorContraAccepted,
+            }
+        );
+    }
+
+    #[test]
+    fn contra_flor_al_resto_accepts_match_difference() {
+        let now = 1_000i64;
+        let mut g = GameState::new_with_forehand(2, 42, 10_000, now, 0);
+        let teams = vec![0u8, 1u8];
+        let match_points = 12;
+        let current_points = [8u8, 6u8];
+
+        set_hand(&mut g, 0, &["7e", "6e", "5e"]);
+        set_hand(&mut g, 1, &["1o", "7o", "3o"]);
+
+        g.apply_command(
+            GameCommand::Flor,
+            0,
+            &teams,
+            match_points,
+            current_points,
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
+        g.apply_command(
+            GameCommand::ContraFlor,
+            1,
+            &teams,
+            match_points,
+            current_points,
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
+        g.apply_command(
+            GameCommand::ContraFlorAlResto,
+            0,
+            &teams,
+            match_points,
+            current_points,
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
+        let outcome = g.apply_command(
+            GameCommand::Quiero,
+            1,
+            &teams,
+            match_points,
+            current_points,
+            FaltaEnvidoGoal::TwoFaltas,
+            10_000,
+            now,
+        );
+
+        assert_eq!(
+            outcome,
+            CommandOutcome::PointsAwarded {
+                winner_team_idx: 0,
+                points: 18,
+                reason: PointsAwardReason::FlorContraAlRestoAccepted,
             }
         );
     }

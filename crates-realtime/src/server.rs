@@ -2128,6 +2128,21 @@ impl Realtime {
                                                 "envido_falta_accepted"
                                             }
                                             PointsAwardReason::EnvidoDeclined => "envido_declined",
+                                            PointsAwardReason::FlorUnopposed => "flor_unopposed",
+                                            PointsAwardReason::FlorAccepted => "flor_accepted",
+                                            PointsAwardReason::FlorDeclined => "flor_declined",
+                                            PointsAwardReason::FlorContraAccepted => {
+                                                "flor_contra_accepted"
+                                            }
+                                            PointsAwardReason::FlorContraDeclined => {
+                                                "flor_contra_declined"
+                                            }
+                                            PointsAwardReason::FlorContraAlRestoAccepted => {
+                                                "flor_contra_al_resto_accepted"
+                                            }
+                                            PointsAwardReason::FlorContraAlRestoDeclined => {
+                                                "flor_contra_al_resto_declined"
+                                            }
                                         };
 
                                         history_action = Some(GameHistoryEvent::GameAction {
