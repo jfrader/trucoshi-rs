@@ -2667,4 +2667,300 @@ mod tests {
 
         Ok(())
     }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn list_tournaments_respects_visibility_and_limit(
+        pool: sqlx::PgPool,
+    ) -> anyhow::Result<()> {
+        use trucoshi_server::tournaments::{repo::TournamentsRepo, types::TournamentStatus};
+
+        let store = trucoshi_store::Store { pool };
+        let repo = TournamentsRepo::new(store.pool.clone());
+
+        let owner_id: i64 = sqlx::query_scalar(
+            "INSERT INTO users (email, password_hash, name) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind("owner@example.com")
+        .bind("hash")
+        .bind("Owner")
+        .fetch_one(&store.pool)
+        .await?;
+
+        let other_owner_id: i64 = sqlx::query_scalar(
+            "INSERT INTO users (email, password_hash, name) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind("other@example.com")
+        .bind("hash")
+        .bind("Other Owner")
+        .fetch_one(&store.pool)
+        .await?;
+
+        let open_old = repo
+            .create_tournament(Some(other_owner_id), "Public Open", 16, None)
+            .await?;
+        repo.update_tournament_status(open_old.id, TournamentStatus::Open)
+            .await?;
+
+        let open_recent = repo
+            .create_tournament(Some(owner_id), "Weekend Open", 8, None)
+            .await?;
+        repo.update_tournament_status(open_recent.id, TournamentStatus::Open)
+            .await?;
+
+        let owner_draft = repo
+            .create_tournament(Some(owner_id), "Owner Draft", 12, None)
+            .await?;
+
+        let state = Arc::new(AppState {
+            store: store.clone(),
+            tokens: trucoshi_auth::tokens::TokenConfig {
+                issuer: "test".into(),
+                audience: "test".into(),
+                access_ttl: Duration::minutes(5),
+                refresh_ttl: Duration::minutes(5),
+                jwt_hs256_secret: vec![0; 32],
+            },
+            cookie: CookieConfig {
+                refresh_cookie_name: "refresh".into(),
+                refresh_cookie_path: "/v1/auth/refresh-tokens".into(),
+                secure: false,
+                same_site: SameSite::Lax,
+            },
+            twitter: TwitterConfig {
+                public_base_url: "http://localhost".into(),
+                client_id: "id".into(),
+                client_secret: "secret".into(),
+            },
+            public_base_url: "http://localhost".into(),
+            mailer: Mailer::disabled(),
+            seed_hash_secret: b"test".to_vec(),
+            realtime: Realtime::new(),
+        });
+
+        let owner_token = trucoshi_auth::jwt::issue_access_jwt(&state.tokens, owner_id).unwrap();
+
+        let app = Router::new()
+            .route("/v1/tournaments", get(list_tournaments))
+            .with_state(state);
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/tournaments?limit=0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let list = payload.as_array().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["name"], serde_json::json!("Weekend Open"));
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/tournaments?limit=10")
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {owner_token}"),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let list = payload.as_array().unwrap();
+        assert_eq!(list.len(), 3);
+        let names: Vec<String> = list
+            .iter()
+            .map(|v| v.get("name").unwrap().as_str().unwrap().to_string())
+            .collect();
+        assert!(names.contains(&"Owner Draft".to_owned()));
+        assert!(names.contains(&"Weekend Open".to_owned()));
+        assert!(names.contains(&"Public Open".to_owned()));
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn tournament_details_and_entries_enforce_visibility(
+        pool: sqlx::PgPool,
+    ) -> anyhow::Result<()> {
+        use trucoshi_server::tournaments::{repo::TournamentsRepo, types::TournamentStatus};
+
+        let store = trucoshi_store::Store { pool };
+        let repo = TournamentsRepo::new(store.pool.clone());
+
+        let owner_id: i64 = sqlx::query_scalar(
+            "INSERT INTO users (email, password_hash, name) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind("owner@example.com")
+        .bind("hash")
+        .bind("Owner")
+        .fetch_one(&store.pool)
+        .await?;
+
+        let viewer_id: i64 = sqlx::query_scalar(
+            "INSERT INTO users (email, password_hash, name) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind("viewer@example.com")
+        .bind("hash")
+        .bind("Viewer")
+        .fetch_one(&store.pool)
+        .await?;
+
+        let tournament = repo
+            .create_tournament(Some(owner_id), "Draft Cup", 8, None)
+            .await?;
+
+        sqlx::query(
+            "INSERT INTO tournament_entries (tournament_id, user_id, display_name) VALUES ($1, $2, $3)",
+        )
+        .bind(tournament.id)
+        .bind(Some(owner_id))
+        .bind("Alpha")
+        .execute(&store.pool)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO tournament_entries (tournament_id, user_id, display_name) VALUES ($1, $2, $3)",
+        )
+        .bind(tournament.id)
+        .bind(Some(viewer_id))
+        .bind("Bravo")
+        .execute(&store.pool)
+        .await?;
+
+        let state = Arc::new(AppState {
+            store: store.clone(),
+            tokens: trucoshi_auth::tokens::TokenConfig {
+                issuer: "test".into(),
+                audience: "test".into(),
+                access_ttl: Duration::minutes(5),
+                refresh_ttl: Duration::minutes(5),
+                jwt_hs256_secret: vec![0; 32],
+            },
+            cookie: CookieConfig {
+                refresh_cookie_name: "refresh".into(),
+                refresh_cookie_path: "/v1/auth/refresh-tokens".into(),
+                secure: false,
+                same_site: SameSite::Lax,
+            },
+            twitter: TwitterConfig {
+                public_base_url: "http://localhost".into(),
+                client_id: "id".into(),
+                client_secret: "secret".into(),
+            },
+            public_base_url: "http://localhost".into(),
+            mailer: Mailer::disabled(),
+            seed_hash_secret: b"test".to_vec(),
+            realtime: Realtime::new(),
+        });
+
+        let owner_token = trucoshi_auth::jwt::issue_access_jwt(&state.tokens, owner_id).unwrap();
+
+        let app = Router::new()
+            .route("/v1/tournaments/{id}", get(get_tournament))
+            .route("/v1/tournaments/{id}/entries", get(list_tournament_entries))
+            .with_state(state.clone());
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/tournaments/{}", tournament.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/tournaments/{}", tournament.id))
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {owner_token}"),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let draft_payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(draft_payload["name"], serde_json::json!("Draft Cup"));
+        assert_eq!(draft_payload["status"], serde_json::json!("DRAFT"));
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/tournaments/{}/entries?limit=0", tournament.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/tournaments/{}/entries?limit=0", tournament.id))
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {owner_token}"),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let entries_payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let entries = entries_payload.as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["display_name"], serde_json::json!("Alpha"));
+
+        repo.update_tournament_status(tournament.id, TournamentStatus::Open)
+            .await?;
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/tournaments/{}/entries?limit=999",
+                        tournament.id
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let entries_payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let entries = entries_payload.as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["display_name"], serde_json::json!("Alpha"));
+        assert_eq!(entries[1]["display_name"], serde_json::json!("Bravo"));
+
+        Ok(())
+    }
 }
