@@ -434,6 +434,9 @@ pub struct PublicPlayer {
     pub team: TeamIdx,
 
     pub ready: bool,
+
+    #[serde(default)]
+    pub is_bot: bool,
 }
 
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]

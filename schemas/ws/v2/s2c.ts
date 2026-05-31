@@ -223,6 +223,7 @@ export interface PublicPendingUnpause {
  * Note: player keys are server-internal (session-bound) and are intentionally not exposed.
  */
 export interface PublicPlayer {
+  is_bot?: boolean;
   name: string;
   ready: boolean;
   team: TeamIdx;

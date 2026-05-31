@@ -365,6 +365,44 @@
           ],
           "properties": {
             "data": {
+              "$ref": "#/definitions/MatchAddBotData"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "match.add_bot"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "type"
+          ],
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/MatchRemoveBotData"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "match.remove_bot"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "type"
+          ],
+          "properties": {
+            "data": {
               "$ref": "#/definitions/ChatJoinData"
             },
             "type": {
@@ -514,6 +552,26 @@
         },
         "match_id": {
           "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "MatchAddBotData": {
+      "type": "object",
+      "required": [
+        "match_id"
+      ],
+      "properties": {
+        "match_id": {
+          "type": "string"
+        },
+        "team": {
+          "description": "Optional requested team (0 or 1). Server may override if full.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/TeamIdx"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -773,6 +831,24 @@
       "properties": {
         "match_id": {
           "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "MatchRemoveBotData": {
+      "type": "object",
+      "required": [
+        "match_id",
+        "seat_idx"
+      ],
+      "properties": {
+        "match_id": {
+          "type": "string"
+        },
+        "seat_idx": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0.0
         }
       },
       "additionalProperties": false

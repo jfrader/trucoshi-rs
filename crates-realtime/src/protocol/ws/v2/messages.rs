@@ -82,6 +82,25 @@ pub struct MatchKickData {
 #[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct MatchAddBotData {
+    pub match_id: String,
+
+    /// Optional requested team (0 or 1). Server may override if full.
+    #[serde(default, skip_serializing_if = "Maybe::is_none")]
+    pub team: Maybe<TeamIdx>,
+}
+
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MatchRemoveBotData {
+    pub match_id: String,
+    pub seat_idx: u8,
+}
+
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MatchOptionsSetData {
     pub match_id: String,
     pub options: MatchOptions,
@@ -320,6 +339,12 @@ pub enum C2sMessage {
 
     #[serde(rename = "match.kick")]
     MatchKick(MatchKickData),
+
+    #[serde(rename = "match.add_bot")]
+    MatchAddBot(MatchAddBotData),
+
+    #[serde(rename = "match.remove_bot")]
+    MatchRemoveBot(MatchRemoveBotData),
 
     #[serde(rename = "chat.join")]
     ChatJoin(ChatJoinData),

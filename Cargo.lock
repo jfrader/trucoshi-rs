@@ -2488,6 +2488,7 @@ dependencies = [
  "anyhow",
  "axum",
  "futures-util",
+ "rand 0.8.5",
  "schemars",
  "serde",
  "serde_json",

@@ -859,6 +859,10 @@
         "team"
       ],
       "properties": {
+        "is_bot": {
+          "default": false,
+          "type": "boolean"
+        },
         "name": {
           "type": "string"
         },

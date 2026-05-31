@@ -75,6 +75,14 @@ export type C2SMessage =
       type: 'match.kick';
     }
   | {
+      data: MatchAddBotData;
+      type: 'match.add_bot';
+    }
+  | {
+      data: MatchRemoveBotData;
+      type: 'match.remove_bot';
+    }
+  | {
       data: ChatJoinData;
       type: 'chat.join';
     }
@@ -221,6 +229,17 @@ export interface MatchOptions2 {
   turn_time_ms: number;
 }
 export interface MatchKickData {
+  match_id: string;
+  seat_idx: number;
+}
+export interface MatchAddBotData {
+  match_id: string;
+  /**
+   * Optional requested team (0 or 1). Server may override if full.
+   */
+  team?: TeamIdx;
+}
+export interface MatchRemoveBotData {
   match_id: string;
   seat_idx: number;
 }

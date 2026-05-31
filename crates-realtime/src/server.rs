@@ -3,9 +3,10 @@ use crate::protocol::ws::v2::messages::{
     ActiveMatchesSnapshotData, LobbyStatsData, MatchKickedData,
 };
 use crate::protocol::ws::v2::{
-    C2sMessage, ChatMessageData, ChatSnapshotData, ErrorPayload, GameSnapshotData, GameUpdateData,
-    HelloData, LobbyMatchRemoveData, LobbyMatchUpsertData, LobbySnapshotData, MatchLeftData,
-    MatchSnapshotData, MatchUpdateData, PongData, S2cMessage, WsInMessage, WsOutMessage,
+    C2sMessage, ChatMessageData, ChatSnapshotData, ErrorPayload, GamePlayCardData, GameSayData,
+    GameSnapshotData, GameUpdateData, HelloData, LobbyMatchRemoveData, LobbyMatchUpsertData,
+    LobbySnapshotData, MatchLeftData, MatchSnapshotData, MatchUpdateData, PongData, S2cMessage,
+    WsInMessage, WsOutMessage,
     schema::{
         ActiveMatchPlayer, ActiveMatchSummary, ChatCommandMetadataOutcome, ChatCommandOutcomeKind,
         ChatMessageMetadata, GameCommand, HandState, LobbyMatch, MatchOptions, MatchPhase, Maybe,
@@ -16,6 +17,7 @@ use crate::protocol::ws::v2::{
 use anyhow::Context;
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{sink::SinkExt, stream::StreamExt};
+use rand::{seq::SliceRandom, thread_rng};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -36,12 +38,38 @@ const UNPAUSE_COUNTDOWN_MS: i64 = 250;
 #[cfg(not(test))]
 const UNPAUSE_COUNTDOWN_MS: i64 = 10_000;
 
-#[derive(Default)]
+const BOT_USER_ID_START: i64 = -1_000_000_000;
+
+#[cfg(test)]
+const BOT_ACTION_DELAY_MS: u64 = 50;
+#[cfg(not(test))]
+const BOT_ACTION_DELAY_MS: u64 = 650;
+
+const BOT_NAMES: &[&str] = &[
+    "Botillo", "Hal", "Sektor", "Cyrax", "Smoke", "Nick", "Adam", "Hodlbot", "Lambot", "Morpheus",
+    "Jack", "Bender", "Smith", "Neo", "Trinity",
+];
+
 pub struct RealtimeState {
     pub connections: usize,
     pub sessions: HashMap<Uuid, SessionState>,
     pub matches: HashMap<String, MatchState>,
     pub rooms: HashMap<String, ChatRoomState>,
+    pub next_bot_user_id: i64,
+    pub pending_bot_turns: HashSet<String>,
+}
+
+impl Default for RealtimeState {
+    fn default() -> Self {
+        Self {
+            connections: 0,
+            sessions: HashMap::new(),
+            matches: HashMap::new(),
+            rooms: HashMap::new(),
+            next_bot_user_id: BOT_USER_ID_START,
+            pending_bot_turns: HashSet::new(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -54,6 +82,7 @@ pub struct SessionState {
 
     pub rooms: HashSet<String>,
     pub last_active_ms: i64,
+    pub is_bot: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +124,8 @@ pub struct PlayerState {
     pub ready: bool,
     pub last_active_ms: i64,
     pub disconnected_at_ms: Option<i64>,
+    pub is_bot: bool,
+    pub bot_session_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone)]
@@ -150,13 +181,13 @@ pub struct MatchState {
     pub hand_no: u32,
 
     /// Current hand/game state.
-    pub game: Option<trucoshi_game::GameState>,
+    pub game: Option<GameState>,
 
     /// When a hand ends but the match is still ongoing, we stage the next hand here.
     ///
     /// This allows us to broadcast the *finished* hand state first (so clients can animate/show
     /// results) and then start the next hand with a second update.
-    pub pending_game: Option<trucoshi_game::GameState>,
+    pub pending_game: Option<GameState>,
 
     pub pause_request: Option<PauseRequestState>,
     pub auto_unpause: Option<AutoUnpauseState>,
@@ -194,9 +225,76 @@ fn team_has_connected_player(m: &MatchState, team: TeamIdx) -> bool {
         .any(|p| p.disconnected_at_ms.is_none())
 }
 
+fn match_disallows_bots(m: &MatchState) -> bool {
+    // Ranked/bet tables are not part of the Rust backend yet. Keep a dedicated
+    // hook so we can flip this on once those options exist.
+    let _ = m;
+    false
+}
+
+fn pick_bot_name(players: &[PlayerState]) -> String {
+    let mut rng = thread_rng();
+    let taken: HashSet<&str> = players
+        .iter()
+        .filter(|p| p.is_bot)
+        .map(|p| p.name.as_str())
+        .collect();
+
+    let mut names = BOT_NAMES.to_vec();
+    names.shuffle(&mut rng);
+    for candidate in names {
+        if !taken.contains(candidate) {
+            return candidate.to_string();
+        }
+    }
+
+    format!("Bot {}", players.len() + 1)
+}
+
+fn bot_card_rank(card: &str) -> i32 {
+    match card {
+        "1e" => 40,
+        "1b" => 39,
+        "7e" => 38,
+        "7o" => 37,
+        "3e" | "3o" | "3b" | "3c" => 36,
+        "2e" | "2o" | "2b" | "2c" => 35,
+        "1o" | "1c" => 34,
+        "re" | "ro" | "rb" | "rc" => 33,
+        "ce" | "co" | "cb" | "cc" => 32,
+        "pe" | "po" | "pb" | "pc" => 31,
+        "7b" => 30,
+        "7c" => 29,
+        "6e" | "6o" | "6b" | "6c" => 28,
+        "5e" | "5o" | "5b" | "5c" => 27,
+        "4e" | "4o" | "4b" | "4c" => 26,
+        _ => 0,
+    }
+}
+
+fn select_bot_card_idx(hand: &[String]) -> Option<u8> {
+    hand.iter()
+        .enumerate()
+        .max_by_key(|(_, card)| bot_card_rank(card))
+        .map(|(idx, _)| u8::try_from(idx).unwrap_or(0))
+}
+
 enum JoinResult {
     NewSeat,
     Reconnected,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BotAction {
+    PlayCard(u8),
+    Say(GameCommand),
+}
+
+struct AddBotResult {
+    seat_idx: u8,
+    team_idx: u8,
+    user_id: i64,
+    name: String,
 }
 
 #[derive(Clone)]
@@ -283,6 +381,7 @@ impl Realtime {
                     player_key: None,
                     rooms: HashSet::new(),
                     last_active_ms: Self::now_ms(),
+                    is_bot: false,
                 },
             );
             debug!(connections = s.connections, %session_id, "ws connected");
@@ -514,6 +613,8 @@ impl Realtime {
                     ready: false,
                     last_active_ms: now_ms,
                     disconnected_at_ms: None,
+                    is_bot: false,
+                    bot_session_id: None,
                 };
 
                 let m = MatchState {
@@ -1036,7 +1137,7 @@ impl Realtime {
                                 if m.game.is_none() {
                                     let forehand = (m.hand_no as u8) % (players_len as u8);
 
-                                    m.game = Some(trucoshi_game::GameState::new_with_forehand(
+                                    m.game = Some(GameState::new_with_forehand(
                                         players_len,
                                         Self::seed_for_hand(&msid, m.hand_no),
                                         m.options.turn_time_ms,
@@ -1061,6 +1162,7 @@ impl Realtime {
                 let correlated = id.clone().map(|id| (session_id, id));
                 self.emit_match_snapshot_to_match(&msid, correlated).await;
                 self.broadcast_lobby_match_upsert(&msid).await;
+                self.maybe_queue_bot_turn(&msid);
             }
 
             C2sMessage::MatchPause(d) => {
@@ -1784,7 +1886,7 @@ impl Realtime {
                                     (m.hand_no as u8) % (players_len as u8)
                                 };
 
-                                m.game = Some(trucoshi_game::GameState::new_with_forehand(
+                                m.game = Some(GameState::new_with_forehand(
                                     players_len,
                                     Self::seed_for_hand(&msid, m.hand_no),
                                     m.options.turn_time_ms,
@@ -1909,14 +2011,13 @@ impl Realtime {
                                             };
 
                                             m.hand_no = m.hand_no.saturating_add(1);
-                                            m.pending_game =
-                                                Some(trucoshi_game::GameState::new_with_forehand(
-                                                    players_len,
-                                                    Self::seed_for_hand(&msid, m.hand_no),
-                                                    m.options.turn_time_ms,
-                                                    Self::now_ms(),
-                                                    next_forehand,
-                                                ));
+                                            m.pending_game = Some(GameState::new_with_forehand(
+                                                players_len,
+                                                Self::seed_for_hand(&msid, m.hand_no),
+                                                m.options.turn_time_ms,
+                                                Self::now_ms(),
+                                                next_forehand,
+                                            ));
                                         }
                                     }
                                 }
@@ -1971,7 +2072,9 @@ impl Realtime {
                     .await;
                 self.broadcast_lobby_match_upsert(&msid).await;
 
-                self.maybe_start_pending_hand(&msid, correlated).await;
+                self.maybe_start_pending_hand(&msid, correlated.clone())
+                    .await;
+                self.maybe_queue_bot_turn(&msid);
             }
 
             C2sMessage::GameSay(d) => {
@@ -2057,7 +2160,7 @@ impl Realtime {
                                 (m.hand_no as u8) % (players_len as u8)
                             };
 
-                            m.game = Some(trucoshi_game::GameState::new_with_forehand(
+                            m.game = Some(GameState::new_with_forehand(
                                 players_len,
                                 Self::seed_for_hand(&msid, m.hand_no),
                                 m.options.turn_time_ms,
@@ -2272,14 +2375,13 @@ impl Realtime {
                                             };
 
                                             m.hand_no = m.hand_no.saturating_add(1);
-                                            m.pending_game =
-                                                Some(trucoshi_game::GameState::new_with_forehand(
-                                                    players_len,
-                                                    Self::seed_for_hand(&msid, m.hand_no),
-                                                    m.options.turn_time_ms,
-                                                    Self::now_ms(),
-                                                    next_forehand,
-                                                ));
+                                            m.pending_game = Some(GameState::new_with_forehand(
+                                                players_len,
+                                                Self::seed_for_hand(&msid, m.hand_no),
+                                                m.options.turn_time_ms,
+                                                Self::now_ms(),
+                                                next_forehand,
+                                            ));
                                         }
 
                                         Some(ChatCommandMetadataOutcome {
@@ -2333,18 +2435,20 @@ impl Realtime {
                     });
                 }
 
+                let correlated = id.clone().map(|id| (session_id, id));
                 {
                     // Protocol v2: echo correlation id on all state updates caused by this
                     // command (match + game).
-                    let correlated = id.clone().map(|id| (session_id, id));
                     self.emit_match_update_to_match(&msid, correlated.clone())
                         .await;
                     self.broadcast_game_update_to_match(&msid, correlated.clone())
                         .await;
                     self.broadcast_lobby_match_upsert(&msid).await;
 
-                    self.maybe_start_pending_hand(&msid, correlated).await;
+                    self.maybe_start_pending_hand(&msid, correlated.clone())
+                        .await;
                 }
+                self.maybe_queue_bot_turn(&msid);
             }
 
             C2sMessage::MatchRematch(d) => {
@@ -2460,6 +2564,8 @@ impl Realtime {
                                         ready: false,
                                         last_active_ms: now_ms,
                                         disconnected_at_ms: None,
+                                        is_bot: player.is_bot,
+                                        bot_session_id: player.bot_session_id,
                                     },
                                     is_owner: player.key == owner_key,
                                 });
@@ -2843,6 +2949,417 @@ impl Realtime {
                 });
             }
 
+            C2sMessage::MatchAddBot(d) => {
+                let msid = d.match_id;
+                let requested_team: Option<TeamIdx> = d.team.into();
+
+                let (active_msid, owner_key, actor_user_id) = {
+                    let s = self.state.lock().await;
+                    let Some(sess) = s.sessions.get(&session_id) else {
+                        return;
+                    };
+                    (
+                        sess.active_match_id.clone(),
+                        sess.player_key.clone(),
+                        sess.user_id,
+                    )
+                };
+
+                let active_msid = match active_msid {
+                    Some(active_msid) => active_msid,
+                    None => {
+                        self.send_to(
+                            session_id,
+                            Self::err_out(id, "NOT_IN_MATCH", "not in a match"),
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                let owner_key = match owner_key {
+                    Some(owner_key) => owner_key,
+                    None => {
+                        self.send_to(
+                            session_id,
+                            Self::err_out(id, "NOT_A_PLAYER", "not a player (spectator)"),
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                if active_msid != msid {
+                    self.send_to(
+                        session_id,
+                        Self::err_out(
+                            id,
+                            "MATCH_MISMATCH",
+                            "message match_id does not match your active match",
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+
+                let now_ms = Self::now_ms();
+                let mut err: Option<(String, String)> = None;
+                let mut outputs: Option<(AddBotResult, (u8, u8))> = None;
+                let mut pending_session: Option<(Uuid, SessionState)> = None;
+                let mut next_bot_user_id: Option<i64> = None;
+
+                {
+                    let mut s = self.state.lock().await;
+                    {
+                        let bot_user_id_seed = s.next_bot_user_id;
+                        let Some(m) = s.matches.get_mut(&msid) else {
+                            self.send_to(
+                                session_id,
+                                Self::err_out(id, "MATCH_NOT_FOUND", "match not found"),
+                            )
+                            .await;
+                            return;
+                        };
+
+                        if m.owner_key != owner_key {
+                            err = Some(("NOT_OWNER".into(), "only the owner can add bots".into()));
+                        } else if m.phase != MatchPhase::Lobby {
+                            err = Some(("BAD_STATE".into(), "match not in lobby".into()));
+                        } else if match_disallows_bots(m) {
+                            err = Some((
+                                "BOTS_DISABLED".into(),
+                                "bots not allowed for this match".into(),
+                            ));
+                        } else if m.players.len() >= (m.options.max_players as usize) {
+                            err = Some(("MATCH_FULL".into(), "match is full".into()));
+                        } else {
+                            let owner_meta = m
+                                .players
+                                .iter()
+                                .position(|p| p.key == owner_key)
+                                .and_then(|idx| {
+                                    m.players
+                                        .get(idx)
+                                        .map(|p| (u8::try_from(idx).unwrap_or(0), p.team.as_u8()))
+                                });
+
+                            if owner_meta.is_none() {
+                                err = Some(("OWNER_NOT_FOUND".into(), "owner seat missing".into()));
+                            } else {
+                                let team_capacity = (m.options.max_players / 2) as usize;
+                                let team_0 = m
+                                    .players
+                                    .iter()
+                                    .filter(|p| p.team == TeamIdx::TEAM_0)
+                                    .count();
+                                let team_1 = m
+                                    .players
+                                    .iter()
+                                    .filter(|p| p.team == TeamIdx::TEAM_1)
+                                    .count();
+
+                                let team_result = if let Some(t) = requested_team {
+                                    match t {
+                                        t if t == TeamIdx::TEAM_0 => {
+                                            if team_0 >= team_capacity {
+                                                Err(("TEAM_FULL".into(), "team 0 is full".into()))
+                                            } else {
+                                                Ok(TeamIdx::TEAM_0)
+                                            }
+                                        }
+                                        t if t == TeamIdx::TEAM_1 => {
+                                            if team_1 >= team_capacity {
+                                                Err(("TEAM_FULL".into(), "team 1 is full".into()))
+                                            } else {
+                                                Ok(TeamIdx::TEAM_1)
+                                            }
+                                        }
+                                        _ => Err(("BAD_REQUEST".into(), "invalid team".into())),
+                                    }
+                                } else if team_0 <= team_1 {
+                                    if team_0 < team_capacity {
+                                        Ok(TeamIdx::TEAM_0)
+                                    } else if team_1 < team_capacity {
+                                        Ok(TeamIdx::TEAM_1)
+                                    } else {
+                                        Err(("MATCH_FULL".into(), "no free slots".into()))
+                                    }
+                                } else if team_1 < team_capacity {
+                                    Ok(TeamIdx::TEAM_1)
+                                } else if team_0 < team_capacity {
+                                    Ok(TeamIdx::TEAM_0)
+                                } else {
+                                    Err(("MATCH_FULL".into(), "no free slots".into()))
+                                };
+
+                                match team_result {
+                                    Ok(team) => {
+                                        let owner_meta = owner_meta.expect("owner meta exists");
+                                        let name = pick_bot_name(&m.players);
+                                        let player_key = Uuid::new_v4().to_string();
+                                        let bot_session_id = Uuid::new_v4();
+                                        let bot_user_id = bot_user_id_seed;
+
+                                        let player = PlayerState {
+                                            key: player_key.clone(),
+                                            user_id: bot_user_id,
+                                            name: name.clone(),
+                                            team,
+                                            ready: true,
+                                            last_active_ms: now_ms,
+                                            disconnected_at_ms: None,
+                                            is_bot: true,
+                                            bot_session_id: Some(bot_session_id),
+                                        };
+
+                                        let (tx, _rx) = mpsc::unbounded_channel();
+                                        pending_session = Some((
+                                            bot_session_id,
+                                            SessionState {
+                                                user_id: bot_user_id,
+                                                tx,
+                                                active_match_id: Some(msid.clone()),
+                                                player_key: Some(player_key.clone()),
+                                                rooms: HashSet::new(),
+                                                last_active_ms: now_ms,
+                                                is_bot: true,
+                                            },
+                                        ));
+
+                                        next_bot_user_id = Some(bot_user_id.saturating_sub(1));
+
+                                        m.players.push(player);
+                                        m.participants.insert(bot_session_id);
+
+                                        outputs = Some((
+                                            AddBotResult {
+                                                seat_idx: u8::try_from(
+                                                    m.players.len().saturating_sub(1),
+                                                )
+                                                .unwrap_or(0),
+                                                team_idx: team.as_u8(),
+                                                user_id: bot_user_id,
+                                                name,
+                                            },
+                                            owner_meta,
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        err = Some(e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(next_id) = next_bot_user_id.take() {
+                        s.next_bot_user_id = next_id;
+                    }
+                    if let Some((sid, sess)) = pending_session.take() {
+                        s.sessions.insert(sid, sess);
+                    }
+                }
+
+                if let Some((code, msg)) = err {
+                    self.send_to(session_id, Self::err_out(id, code, msg)).await;
+                    return;
+                }
+
+                let Some((result, (owner_seat_idx, owner_team_idx))) = outputs else {
+                    return;
+                };
+
+                self.emit_history(GameHistoryEvent::PlayerJoined {
+                    match_id: msid.clone(),
+                    seat_idx: result.seat_idx,
+                    team_idx: result.team_idx,
+                    user_id: result.user_id,
+                    display_name: result.name.clone(),
+                });
+
+                self.emit_history(GameHistoryEvent::GameAction {
+                    match_id: msid.clone(),
+                    actor_seat_idx: Some(owner_seat_idx),
+                    actor_team_idx: Some(owner_team_idx),
+                    actor_user_id,
+                    ty: "match.add_bot".into(),
+                    data: serde_json::json!({
+                        "seat_idx": result.seat_idx,
+                        "team_idx": result.team_idx,
+                        "bot_user_id": result.user_id,
+                        "bot_display_name": result.name,
+                        "server_time_ms": now_ms,
+                    }),
+                });
+
+                let correlated = id.clone().map(|id| (session_id, id));
+                self.emit_match_update_to_match(&msid, correlated).await;
+                self.broadcast_lobby_match_upsert(&msid).await;
+            }
+            C2sMessage::MatchRemoveBot(d) => {
+                let msid = d.match_id;
+                let target_seat = usize::from(d.seat_idx);
+
+                let (active_msid, owner_key, actor_user_id) = {
+                    let s = self.state.lock().await;
+                    let Some(sess) = s.sessions.get(&session_id) else {
+                        return;
+                    };
+                    (
+                        sess.active_match_id.clone(),
+                        sess.player_key.clone(),
+                        sess.user_id,
+                    )
+                };
+
+                let active_msid = match active_msid {
+                    Some(active_msid) => active_msid,
+                    None => {
+                        self.send_to(
+                            session_id,
+                            Self::err_out(id, "NOT_IN_MATCH", "not in a match"),
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                let owner_key = match owner_key {
+                    Some(owner_key) => owner_key,
+                    None => {
+                        self.send_to(
+                            session_id,
+                            Self::err_out(id, "NOT_A_PLAYER", "not a player (spectator)"),
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                if active_msid != msid {
+                    self.send_to(
+                        session_id,
+                        Self::err_out(
+                            id,
+                            "MATCH_MISMATCH",
+                            "message match_id does not match your active match",
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+
+                let now_ms = Self::now_ms();
+                let mut owner_meta: Option<(u8, u8)> = None;
+                let mut target: Option<(String, i64, Option<Uuid>, u8, u8, String)> = None;
+                let mut err: Option<(String, String)> = None;
+
+                {
+                    let s = self.state.lock().await;
+                    let Some(m) = s.matches.get(&msid) else {
+                        self.send_to(
+                            session_id,
+                            Self::err_out(id, "MATCH_NOT_FOUND", "match not found"),
+                        )
+                        .await;
+                        return;
+                    };
+
+                    if m.owner_key != owner_key {
+                        err = Some(("NOT_OWNER".into(), "only the owner can remove bots".into()));
+                    } else if m.phase != MatchPhase::Lobby {
+                        err = Some(("BAD_STATE".into(), "match not in lobby".into()));
+                    } else if target_seat >= m.players.len() {
+                        err = Some(("PLAYER_NOT_FOUND".into(), "seat not found".into()));
+                    } else {
+                        owner_meta =
+                            m.players
+                                .iter()
+                                .position(|p| p.key == owner_key)
+                                .and_then(|idx| {
+                                    m.players
+                                        .get(idx)
+                                        .map(|p| (u8::try_from(idx).unwrap_or(0), p.team.as_u8()))
+                                });
+
+                        if owner_meta.is_none() {
+                            err = Some(("OWNER_NOT_FOUND".into(), "owner seat missing".into()));
+                        } else {
+                            let player = m.players[target_seat].clone();
+                            if !player.is_bot {
+                                err = Some(("NOT_A_BOT".into(), "seat is not a bot".into()));
+                            } else {
+                                target = Some((
+                                    player.key.clone(),
+                                    player.user_id,
+                                    player.bot_session_id,
+                                    u8::try_from(target_seat).unwrap_or(0),
+                                    player.team.as_u8(),
+                                    player.name.clone(),
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                if let Some((code, msg)) = err {
+                    self.send_to(session_id, Self::err_out(id, code, msg)).await;
+                    return;
+                }
+
+                let Some((
+                    target_key,
+                    target_user_id,
+                    target_session,
+                    target_seat_idx,
+                    target_team_idx,
+                    target_name,
+                )) = target
+                else {
+                    self.send_to(
+                        session_id,
+                        Self::err_out(id, "PLAYER_NOT_FOUND", "seat not found"),
+                    )
+                    .await;
+                    return;
+                };
+
+                let removal_sid = target_session.unwrap_or_else(Uuid::nil);
+                let removed = self
+                    .leave_match_internal(
+                        removal_sid,
+                        &msid,
+                        &target_key,
+                        target_user_id,
+                        "owner_remove_bot",
+                    )
+                    .await;
+
+                if removed {
+                    self.broadcast_lobby_match_remove(&msid).await;
+                } else {
+                    self.broadcast_lobby_match_upsert(&msid).await;
+                }
+
+                if let Some((owner_seat_idx, owner_team_idx)) = owner_meta {
+                    self.emit_history(GameHistoryEvent::GameAction {
+                        match_id: msid.clone(),
+                        actor_seat_idx: Some(owner_seat_idx),
+                        actor_team_idx: Some(owner_team_idx),
+                        actor_user_id,
+                        ty: "match.remove_bot".into(),
+                        data: serde_json::json!({
+                            "target_seat_idx": target_seat_idx,
+                            "target_team_idx": target_team_idx,
+                            "target_user_id": target_user_id,
+                            "target_display_name": target_name,
+                            "reason": "owner_remove_bot",
+                            "server_time_ms": now_ms,
+                        }),
+                    });
+                }
+            }
+
             C2sMessage::ChatJoin(d) => {
                 let allowed = {
                     let s = self.state.lock().await;
@@ -2905,6 +3422,132 @@ impl Realtime {
                 self.broadcast_chat_message(&d.room_id, message, correlated)
                     .await;
             }
+        }
+    }
+
+    fn maybe_queue_bot_turn(&self, match_id: &str) {
+        let rt = self.clone();
+        let match_id = match_id.to_string();
+
+        tokio::spawn(async move {
+            let (session_id, player_key) = {
+                let mut s = rt.state.lock().await;
+                let info = {
+                    let Some(m) = s.matches.get(&match_id) else {
+                        s.pending_bot_turns.remove(&match_id);
+                        return;
+                    };
+
+                    if m.phase != MatchPhase::Started {
+                        s.pending_bot_turns.remove(&match_id);
+                        return;
+                    }
+
+                    let Some(game) = m.game.as_ref() else {
+                        s.pending_bot_turns.remove(&match_id);
+                        return;
+                    };
+
+                    let turn_idx = usize::from(game.public.turn_seat_idx);
+                    let Some(player) = m.players.get(turn_idx) else {
+                        s.pending_bot_turns.remove(&match_id);
+                        return;
+                    };
+
+                    if !player.is_bot {
+                        s.pending_bot_turns.remove(&match_id);
+                        return;
+                    }
+
+                    let Some(bot_session_id) = player.bot_session_id else {
+                        s.pending_bot_turns.remove(&match_id);
+                        return;
+                    };
+
+                    Some((bot_session_id, player.key.clone()))
+                };
+
+                let Some(info) = info else {
+                    return;
+                };
+
+                if !s.pending_bot_turns.insert(match_id.clone()) {
+                    return;
+                }
+
+                info
+            };
+
+            sleep(Duration::from_millis(BOT_ACTION_DELAY_MS)).await;
+            rt.execute_bot_turn(match_id, session_id, player_key).await;
+        });
+    }
+
+    async fn execute_bot_turn(self, match_id: String, session_id: Uuid, player_key: String) {
+        let action = {
+            let mut s = self.state.lock().await;
+            s.pending_bot_turns.remove(&match_id);
+
+            let Some(m) = s.matches.get(&match_id) else {
+                return;
+            };
+
+            if m.phase != MatchPhase::Started {
+                return;
+            }
+
+            let Some(game) = m.game.as_ref() else {
+                return;
+            };
+
+            let Some(player_idx) = m.players.iter().position(|p| p.key == player_key) else {
+                return;
+            };
+
+            if !m.players.get(player_idx).map(|p| p.is_bot).unwrap_or(false) {
+                return;
+            }
+
+            Self::bot_decision(game, player_idx)
+        };
+
+        let Some(action) = action else {
+            return;
+        };
+
+        let msg = match action {
+            BotAction::PlayCard(card_idx) => C2sMessage::GamePlayCard(GamePlayCardData {
+                match_id: match_id.clone(),
+                card_idx,
+            }),
+            BotAction::Say(command) => C2sMessage::GameSay(GameSayData {
+                match_id: match_id.clone(),
+                command,
+            }),
+        };
+
+        self.handle_message(
+            session_id,
+            WsInMessage {
+                v: Default::default(),
+                msg,
+                id: Default::default(),
+            },
+        )
+        .await;
+    }
+
+    fn bot_decision(game: &GameState, player_idx: usize) -> Option<BotAction> {
+        match game.public.hand_state {
+            HandState::WaitingPlay => {
+                let hand = game.hands().get(player_idx)?;
+                select_bot_card_idx(hand).map(BotAction::PlayCard)
+            }
+            HandState::WaitingForTrucoAnswer => Some(BotAction::Say(GameCommand::NoQuiero)),
+            HandState::WaitingEnvidoAnswer => Some(BotAction::Say(GameCommand::NoQuiero)),
+            HandState::WaitingEnvidoPointsAnswer => Some(BotAction::Say(GameCommand::SonBuenas)),
+            HandState::WaitingFlorAnswer => Some(BotAction::Say(GameCommand::NoQuiero)),
+            _ => None,
         }
     }
 
@@ -3036,6 +3679,7 @@ impl Realtime {
                 name: p.name.clone(),
                 team: p.team,
                 ready: p.ready,
+                is_bot: p.is_bot,
             })
             .collect::<Vec<_>>();
 
@@ -3061,6 +3705,9 @@ impl Realtime {
         let mut users: HashSet<i64> = HashSet::new();
 
         for sess in state.sessions.values() {
+            if sess.is_bot {
+                continue;
+            }
             users.insert(sess.user_id);
         }
 
@@ -3077,6 +3724,7 @@ impl Realtime {
                 name: p.name.clone(),
                 team: p.team,
                 ready: p.ready,
+                is_bot: p.is_bot,
             })
             .collect::<Vec<_>>();
 
@@ -3283,6 +3931,7 @@ impl Realtime {
         self.emit_history(history_event);
         self.emit_match_update_to_match(&match_id, None).await;
         self.broadcast_lobby_match_upsert(&match_id).await;
+        self.maybe_queue_bot_turn(&match_id);
     }
 
     fn private_player_for(m: &MatchState, recipient_key: Option<&str>) -> Option<PrivatePlayer> {
@@ -3628,6 +4277,8 @@ impl Realtime {
                 ready: false,
                 last_active_ms: now_ms,
                 disconnected_at_ms: None,
+                is_bot: false,
+                bot_session_id: None,
             });
 
             m.participants.insert(session_id);
@@ -3655,10 +4306,14 @@ impl Realtime {
         let mut history_finish: Option<[u8; 2]> = None;
         {
             let mut s = self.state.lock().await;
+            let mut remove_session: Option<Uuid> = None;
 
             if let Some(sess) = s.sessions.get_mut(&session_id) {
                 sess.active_match_id = None;
                 sess.player_key = None;
+                if sess.is_bot {
+                    remove_session = Some(session_id);
+                }
             }
 
             if let Some(m) = s.matches.get_mut(match_id) {
@@ -3708,6 +4363,14 @@ impl Realtime {
                     s.matches.remove(match_id);
                     removed = true;
                 }
+            }
+
+            if let Some(bot_sid) = remove_session {
+                s.sessions.remove(&bot_sid);
+            }
+
+            if removed {
+                s.pending_bot_turns.remove(match_id);
             }
         }
 
@@ -3831,6 +4494,9 @@ impl Realtime {
                 let lobby_deadline = abandon_ms.saturating_add(m.options.reconnect_grace_ms.max(1));
 
                 for (idx, player) in m.players.iter().enumerate() {
+                    if player.is_bot {
+                        continue;
+                    }
                     let seat_idx = u8::try_from(idx).unwrap_or(0);
                     if let Some(disconnected_at) = player.disconnected_at_ms {
                         if now.saturating_sub(disconnected_at) >= abandon_ms {
@@ -4340,7 +5006,8 @@ mod e2e_smoke_tests {
     use super::*;
     use crate::history::GameHistoryEvent;
     use crate::protocol::ws::v2::messages::{
-        MatchKickData, MatchOptionsSetData, MatchPauseVoteData, MatchWatchData,
+        MatchAddBotData, MatchKickData, MatchOptionsSetData, MatchPauseVoteData,
+        MatchRemoveBotData, MatchWatchData,
     };
     use crate::protocol::ws::v2::schema::{
         ChatCommandOutcomeKind, ChatMessageMetadata, GameCommand,
@@ -4369,6 +5036,7 @@ mod e2e_smoke_tests {
                 player_key: None,
                 rooms: std::collections::HashSet::new(),
                 last_active_ms: Realtime::now_ms(),
+                is_bot: false,
             },
         );
 
@@ -4453,7 +5121,7 @@ mod e2e_smoke_tests {
     fn lobby_stats_counts_distinct_users() {
         let mut state = RealtimeState::default();
 
-        for user_id in [42, 42, 77, -1] {
+        for (user_id, is_bot) in [(42, false), (42, false), (77, false), (-1, true)] {
             let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
             state.sessions.insert(
                 Uuid::new_v4(),
@@ -4464,12 +5132,16 @@ mod e2e_smoke_tests {
                     player_key: None,
                     rooms: std::collections::HashSet::new(),
                     last_active_ms: 0,
+                    is_bot,
                 },
             );
         }
 
         let stats = Realtime::lobby_stats_for(&state);
-        assert_eq!(stats.online_players, 3);
+        assert_eq!(
+            stats.online_players, 2,
+            "bots should not count towards online players",
+        );
     }
 
     #[tokio::test]
@@ -4490,6 +5162,258 @@ mod e2e_smoke_tests {
                 other => panic!("expected lobby stats, got {other:?}"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn owner_can_add_and_remove_bots() {
+        let rt = Realtime::new();
+        let (owner, _rx_owner) = add_session(&rt, 10).await;
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchCreate(MatchCreateData {
+                    name: "owner".into(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                    options: Some(MatchOptions {
+                        max_players: 4,
+                        match_points: 1,
+                        turn_time_ms: 30_000,
+                        ..MatchOptions::default()
+                    })
+                    .into(),
+                }),
+            },
+        )
+        .await;
+
+        let match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&owner)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("owner should be in a match")
+        };
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchAddBot(MatchAddBotData {
+                    match_id: match_id.clone(),
+                    team: None.into(),
+                }),
+            },
+        )
+        .await;
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchAddBot(MatchAddBotData {
+                    match_id: match_id.clone(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                }),
+            },
+        )
+        .await;
+
+        let (bot_session_id, bot_seat_idx) = {
+            let s = rt.state.lock().await;
+            let m = s.matches.get(&match_id).expect("match exists");
+            assert_eq!(m.players.len(), 3, "owner + two bots");
+            assert_eq!(m.players.iter().filter(|p| p.is_bot).count(), 2);
+            for player in &m.players {
+                if player.is_bot {
+                    assert!(player.ready, "bots should auto-ready");
+                }
+            }
+            let idx = m.players.len() - 1;
+            let bot = m.players.get(idx).expect("bot seat present");
+            (
+                bot.bot_session_id.expect("bot session id"),
+                u8::try_from(idx).unwrap_or(0),
+            )
+        };
+
+        {
+            let s = rt.state.lock().await;
+            let sess = s
+                .sessions
+                .get(&bot_session_id)
+                .expect("bot session tracked");
+            assert!(sess.is_bot, "bot session flagged");
+            assert_eq!(sess.active_match_id.as_deref(), Some(match_id.as_str()));
+        }
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchRemoveBot(MatchRemoveBotData {
+                    match_id: match_id.clone(),
+                    seat_idx: bot_seat_idx,
+                }),
+            },
+        )
+        .await;
+
+        {
+            let s = rt.state.lock().await;
+            let m = s.matches.get(&match_id).expect("match exists");
+            assert_eq!(m.players.len(), 2);
+            assert_eq!(m.players.iter().filter(|p| p.is_bot).count(), 1);
+            assert!(
+                !s.sessions.contains_key(&bot_session_id),
+                "bot session should be removed after owner removal",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn bots_take_their_turns_when_needed() {
+        use tokio::time::{Duration, sleep, timeout};
+
+        let rt = Realtime::new();
+        let (owner, _rx_owner) = add_session(&rt, 20).await;
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchCreate(MatchCreateData {
+                    name: "owner".into(),
+                    team: Some(TeamIdx::TEAM_0).into(),
+                    options: Some(MatchOptions {
+                        max_players: 2,
+                        match_points: 1,
+                        turn_time_ms: 30_000,
+                        ..MatchOptions::default()
+                    })
+                    .into(),
+                }),
+            },
+        )
+        .await;
+
+        let match_id = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&owner)
+                .and_then(|sess| sess.active_match_id.clone())
+                .expect("owner should be in a match")
+        };
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchAddBot(MatchAddBotData {
+                    match_id: match_id.clone(),
+                    team: Some(TeamIdx::TEAM_1).into(),
+                }),
+            },
+        )
+        .await;
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchReady(MatchReadyData {
+                    match_id: match_id.clone(),
+                    ready: true,
+                }),
+            },
+        )
+        .await;
+
+        rt.handle_message(
+            owner,
+            WsInMessage {
+                v: Default::default(),
+                id: Default::default(),
+                msg: C2sMessage::MatchStart(MatchRefData {
+                    match_id: match_id.clone(),
+                }),
+            },
+        )
+        .await;
+
+        let owner_player_key = {
+            let s = rt.state.lock().await;
+            s.sessions
+                .get(&owner)
+                .and_then(|sess| sess.player_key.clone())
+                .expect("owner should have a seat")
+        };
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let (phase, owner_turn, owner_hand_len) = {
+                    let s = rt.state.lock().await;
+                    let m = s.matches.get(&match_id).expect("match exists");
+                    let owner_idx = m
+                        .players
+                        .iter()
+                        .position(|p| p.key == owner_player_key)
+                        .expect("owner seat idx");
+                    let phase = m.phase;
+                    let owner_turn = matches!(
+                        m.game.as_ref(),
+                        Some(g) if g.public.turn_seat_idx as usize == owner_idx
+                    );
+                    let owner_hand_len = m
+                        .game
+                        .as_ref()
+                        .and_then(|g| g.hands().get(owner_idx).map(|h| h.len()))
+                        .unwrap_or(0);
+                    (phase, owner_turn, owner_hand_len)
+                };
+
+                if phase == MatchPhase::Finished {
+                    break;
+                }
+
+                if owner_turn {
+                    assert!(owner_hand_len > 0, "owner should have cards when on turn");
+                    rt.handle_message(
+                        owner,
+                        WsInMessage {
+                            v: Default::default(),
+                            id: Default::default(),
+                            msg: C2sMessage::GamePlayCard(GamePlayCardData {
+                                match_id: match_id.clone(),
+                                card_idx: 0,
+                            }),
+                        },
+                    )
+                    .await;
+                } else {
+                    sleep(Duration::from_millis(75)).await;
+                }
+            }
+        })
+        .await
+        .expect("match with bot opponent should finish");
+
+        let (phase, team_points) = {
+            let s = rt.state.lock().await;
+            let m = s.matches.get(&match_id).expect("match still tracked");
+            (m.phase, m.team_points)
+        };
+
+        assert_eq!(phase, MatchPhase::Finished);
+        assert!(team_points[0] + team_points[1] > 0);
     }
 
     async fn run_match_to_completion(rt: &Realtime, owner: Uuid, player: Uuid) -> String {
